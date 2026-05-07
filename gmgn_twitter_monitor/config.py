@@ -77,6 +77,13 @@ TG_FILTER_HANDLES = [
 if _routing_handles:
     TG_FILTER_HANDLES = list(set(TG_FILTER_HANDLES) | _routing_handles)
 
+# ---------- Binance Square 配置 ----------
+BINANCE_SQUARE_HANDLES = [
+    h.strip().lower()
+    for h in os.getenv("BINANCE_SQUARE_HANDLES", "").split(",")
+    if h.strip()
+]
+
 # ---------- 飞书推送配置 ----------
 FEISHU_APP_ID = os.getenv("FEISHU_APP_ID", "")
 FEISHU_APP_SECRET = os.getenv("FEISHU_APP_SECRET", "")

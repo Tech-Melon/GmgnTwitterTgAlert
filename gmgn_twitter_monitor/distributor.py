@@ -424,50 +424,64 @@ class TelegramDistributor(BaseDistributor):
         
         # ──── 动态计算预览链接 (使用 FxTwitter 获得更好预览) ────
         preview_url = None
-        if action in ("follow", "unfollow"):
-            t_handle = message.get("unfollow_target", {}).get("handle")
-            if t_handle:
-                preview_url = f"https://vxtwitter.com/{t_handle}"
-        elif action == "repost":
+        from . import config
+        if handle and handle.lower() in config.BINANCE_SQUARE_HANDLES:
+            # 对于币安广场账号，FxTwitter 链接无法解析，直接提取内容中的首张图片作为预览
+            content = message.get("content", {}) or {}
             reference = message.get("reference") or {}
-            ref_handle = reference.get("author_handle")
-            ref_tweet_id = reference.get("tweet_id")
-            if ref_handle and ref_tweet_id:
-                preview_url = f"https://fxtwitter.com/{ref_handle}/status/{ref_tweet_id}"
-            elif message.get("tweet_id") and handle:
-                preview_url = f"https://fxtwitter.com/{handle}/status/{message.get('tweet_id')}"
-        elif action in ("reply", "quote"):
-            reference = message.get("reference") or {}
-            ref_handle = reference.get("author_handle")
-            ref_tweet_id = reference.get("tweet_id")
-            content = message.get("content") or {}
-            has_media = len(content.get("media") or []) > 0
+            content_media = content.get("media") or []
+            if not content_media:
+                content_media = reference.get("media") or []
             
-            if has_media and message.get("tweet_id") and handle:
-                preview_url = f"https://fxtwitter.com/{handle}/status/{message.get('tweet_id')}"
-            elif ref_handle and ref_tweet_id:
-                preview_url = f"https://fxtwitter.com/{ref_handle}/status/{ref_tweet_id}"
-            else:
-                tweet_id = message.get("tweet_id", "")
-                if tweet_id and handle:
-                    preview_url = f"https://fxtwitter.com/{handle}/status/{tweet_id}"
-        elif action == "delete_post":
-            reference = message.get("reference") or {}
-            ref_handle = reference.get("author_handle")
-            ref_tweet_id = reference.get("tweet_id")
-            if ref_handle and ref_tweet_id:
-                preview_url = f"https://fxtwitter.com/{ref_handle}/status/{ref_tweet_id}"
-            else:
-                tweet_id = message.get("tweet_id", "")
-                if tweet_id and handle:
-                    preview_url = f"https://fxtwitter.com/{handle}/status/{tweet_id}"
-        elif action in ("tweet", "pin", "unpin"):
-            tweet_id = message.get("tweet_id", "")
-            if tweet_id and handle:
-                preview_url = f"https://fxtwitter.com/{handle}/status/{tweet_id}"
+            for m in content_media:
+                if m.get("type") in ("photo", "image", "thumbnail", "video") and m.get("url"):
+                    preview_url = m.get("url")
+                    break
         else:
-            if handle:
-                preview_url = f"https://vxtwitter.com/{handle}"
+            if action in ("follow", "unfollow"):
+                t_handle = message.get("unfollow_target", {}).get("handle")
+                if t_handle:
+                    preview_url = f"https://vxtwitter.com/{t_handle}"
+            elif action == "repost":
+                reference = message.get("reference") or {}
+                ref_handle = reference.get("author_handle")
+                ref_tweet_id = reference.get("tweet_id")
+                if ref_handle and ref_tweet_id:
+                    preview_url = f"https://fxtwitter.com/{ref_handle}/status/{ref_tweet_id}"
+                elif message.get("tweet_id") and handle:
+                    preview_url = f"https://fxtwitter.com/{handle}/status/{message.get('tweet_id')}"
+            elif action in ("reply", "quote"):
+                reference = message.get("reference") or {}
+                ref_handle = reference.get("author_handle")
+                ref_tweet_id = reference.get("tweet_id")
+                content = message.get("content") or {}
+                has_media = len(content.get("media") or []) > 0
+                
+                if has_media and message.get("tweet_id") and handle:
+                    preview_url = f"https://fxtwitter.com/{handle}/status/{message.get('tweet_id')}"
+                elif ref_handle and ref_tweet_id:
+                    preview_url = f"https://fxtwitter.com/{ref_handle}/status/{ref_tweet_id}"
+                else:
+                    tweet_id = message.get("tweet_id", "")
+                    if tweet_id and handle:
+                        preview_url = f"https://fxtwitter.com/{handle}/status/{tweet_id}"
+            elif action == "delete_post":
+                reference = message.get("reference") or {}
+                ref_handle = reference.get("author_handle")
+                ref_tweet_id = reference.get("tweet_id")
+                if ref_handle and ref_tweet_id:
+                    preview_url = f"https://fxtwitter.com/{ref_handle}/status/{ref_tweet_id}"
+                else:
+                    tweet_id = message.get("tweet_id", "")
+                    if tweet_id and handle:
+                        preview_url = f"https://fxtwitter.com/{handle}/status/{tweet_id}"
+            elif action in ("tweet", "pin", "unpin"):
+                tweet_id = message.get("tweet_id", "")
+                if tweet_id and handle:
+                    preview_url = f"https://fxtwitter.com/{handle}/status/{tweet_id}"
+            else:
+                if handle:
+                    preview_url = f"https://vxtwitter.com/{handle}"
 
         link_preview_options = {"is_disabled": False, "prefer_large_media": True}
         if preview_url:

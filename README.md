@@ -137,6 +137,7 @@ nano .env
 | `TG_CHANNEL_ID_<GROUP>` | ❌ | 分组目标频道 ID，如 `TG_CHANNEL_ID_BINANCE=-100xxx` |
 | `TG_ROUTING_<GROUP>` | ❌ | 分组内的推特 Handle 列表（逗号分隔），如 `TG_ROUTING_BINANCE=cz_binance` |
 | `TG_FILTER_HANDLES` | ❌ | 附加白名单（一般留空，路由分组的 Handle 会自动合并） |
+| `BINANCE_SQUARE_HANDLES` | ❌ | 币安广场等非 Twitter 账号的 ID 列表（逗号分隔），由于 FxTwitter 无法解析，会自动提取原图渲染为大图 |
 | `DEEPSEEK_API_KEY` | ❌ | DeepSeek API Key，留空则跳过翻译 |
 | `WEBHOOK_URL` | ❌ | Webhook 推送目标 URL，留空则禁用 |
 | `WEBHOOK_SECRET` | ❌ | HMAC-SHA256 签名密钥 |
@@ -159,6 +160,11 @@ FEISHU_SECRET_BINANCE=your-secret                    # 飞书安全签名密钥
 
 - 同一个 Handle 可以出现在多个分组中，会同时推送到所有匹配的频道
 - `TG_FILTER_HANDLES` 无需手动填写路由分组里的 Handle，系统会自动合并
+
+#### 非推特账号特殊处理 (如币安广场)
+
+对于非推特源的账号（如币安广场的 `cz`、`heyi`），由于它们不是真实的推特用户名，依赖推特链接（`fxtwitter.com`）解析图片会失败。
+你可以在 `.env` 中配置 `BINANCE_SQUARE_HANDLES=cz,heyi`。当系统检测到这些账号时，会跳过推特链接拼接，直接从数据源的 JSON 中抽取真实的图片直链（Raw Image URL）交给 Telegram 渲染。这样既保证了能看到大图预览，又维持了 4096 的文本容量。
 
 ### 飞书群组配置与避坑指南
 
