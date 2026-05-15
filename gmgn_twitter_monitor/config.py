@@ -7,7 +7,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
 
 FIRST_RUN_LOGIN = False
-AUTH_URL = "https://gmgn.ai/tglogin?user_id=53b06598-3e2b-4d2f-aec6-f2e5881def90&code=10355196-216d-4f12-bbf3-5407abb1eb6c&id=0eae54fb142533ac"
+AUTH_URL = "https://gmgn.ai/tglogin?user_id=53b06598-3e2b-4d2f-aec6-f2e5881def90&code=7074fc4c-080d-498b-baf4-936349f3d155&id=0eae54fb142533ac"
 
 LOG_FILE = str(BASE_DIR / "twitter_monitor.log")
 USER_DATA_DIR = str(BASE_DIR / "browser_data")

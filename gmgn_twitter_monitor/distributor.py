@@ -173,6 +173,16 @@ class TelegramDistributor(BaseDistributor):
         """转义 HTML 特殊字符。"""
         return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
+    @staticmethod
+    def _wrap_blockquote(content: str, raw_text_len: int, threshold: int = 128) -> str:
+        """根据原始文本长度决定是否使用可折叠 blockquote。
+
+        ≤ threshold: 普通 blockquote，完整展示
+        > threshold: expandable blockquote，折叠后默认显示 3 行
+        """
+        tag = "blockquote expandable" if raw_text_len > threshold else "blockquote"
+        return f"<{tag}>{content}</blockquote>"
+
     def _format_followers(self, count: int | None) -> str:
         """格式化粉丝数为可读字符串。"""
         if not count:
@@ -271,7 +281,7 @@ class TelegramDistributor(BaseDistributor):
                 if text:
                     if len(text) > 800: text = text[:800] + "...\n[⬇️ 正文过长已截断]"
                     lines.append("")
-                    lines.append(f"<blockquote expandable>{self._escape_html(text)}</blockquote>")
+                    lines.append(self._wrap_blockquote(self._escape_html(text), len(text)))
 
                 # 展示 reference.text（被回复/引用/转推/删帖的原文），用 blockquote 区分
                 reference = msg.get("reference") or {}
@@ -279,7 +289,7 @@ class TelegramDistributor(BaseDistributor):
                 if ref_text:
                     if len(ref_text) > 500: ref_text = ref_text[:500] + "...\n[⬇️ 原推过长已截断]"
                     lines.append("")
-                    lines.append(f"<blockquote expandable>💬 原推：\n{self._escape_html(ref_text)}</blockquote>")
+                    lines.append(self._wrap_blockquote(f"💬 原推：\n{self._escape_html(ref_text)}", len(ref_text)))
 
         return "\n".join(lines)
 
@@ -361,11 +371,11 @@ class TelegramDistributor(BaseDistributor):
         if main_text or bio_text:
             t_text = main_text if main_text else bio_text
             o_text = text_parts.get("content", "") if main_text else text_parts.get("bio", "")
-            translated_html_parts.append(f"<blockquote expandable>{format_part(t_text, o_text, is_ref=False)}</blockquote>")
+            translated_html_parts.append(self._wrap_blockquote(format_part(t_text, o_text, is_ref=False), len(t_text)))
         if ref_text:
             o_ref = text_parts.get("reference", "")
             escaped_ref = format_part(ref_text, o_ref, is_ref=True)
-            translated_html_parts.append(f"<blockquote expandable>💬 原推翻译：\n{escaped_ref}</blockquote>")
+            translated_html_parts.append(self._wrap_blockquote(f"💬 原推翻译：\n{escaped_ref}", len(ref_text)))
 
         translated_html = "\n\n".join(translated_html_parts)
         
