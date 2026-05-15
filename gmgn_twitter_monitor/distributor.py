@@ -271,7 +271,7 @@ class TelegramDistributor(BaseDistributor):
                 if text:
                     if len(text) > 800: text = text[:800] + "...\n[⬇️ 正文过长已截断]"
                     lines.append("")
-                    lines.append(self._escape_html(text))
+                    lines.append(f"<blockquote expandable>{self._escape_html(text)}</blockquote>")
 
                 # 展示 reference.text（被回复/引用/转推/删帖的原文），用 blockquote 区分
                 reference = msg.get("reference") or {}
@@ -279,7 +279,7 @@ class TelegramDistributor(BaseDistributor):
                 if ref_text:
                     if len(ref_text) > 500: ref_text = ref_text[:500] + "...\n[⬇️ 原推过长已截断]"
                     lines.append("")
-                    lines.append(f"<blockquote>💬 原推：\n{self._escape_html(ref_text)}</blockquote>")
+                    lines.append(f"<blockquote expandable>💬 原推：\n{self._escape_html(ref_text)}</blockquote>")
 
         return "\n".join(lines)
 
@@ -361,11 +361,11 @@ class TelegramDistributor(BaseDistributor):
         if main_text or bio_text:
             t_text = main_text if main_text else bio_text
             o_text = text_parts.get("content", "") if main_text else text_parts.get("bio", "")
-            translated_html_parts.append(format_part(t_text, o_text, is_ref=False))
+            translated_html_parts.append(f"<blockquote expandable>{format_part(t_text, o_text, is_ref=False)}</blockquote>")
         if ref_text:
             o_ref = text_parts.get("reference", "")
             escaped_ref = format_part(ref_text, o_ref, is_ref=True)
-            translated_html_parts.append(f"<blockquote>💬 原推翻译：\n{escaped_ref}</blockquote>")
+            translated_html_parts.append(f"<blockquote expandable>💬 原推翻译：\n{escaped_ref}</blockquote>")
 
         translated_html = "\n\n".join(translated_html_parts)
         
