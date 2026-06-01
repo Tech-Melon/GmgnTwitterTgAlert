@@ -63,19 +63,22 @@ class BrowserManager:
 
     async def switch_to_mine_tab(self):
         try:
-            my_tab = self.page.locator("xpath=//*[text()='我的' or text()='Mine']").first
+            my_tab = self.page.locator("xpath=//*[text()='我的' or text()='Mine' or text()='关注' or text()='Following']").first
             if await my_tab.is_visible(timeout=2000):
-                logger.info("找到【我的/Mine】标签，正在切换...")
+                logger.info("找到【我的/Mine/Following】标签，正在切换...")
                 await my_tab.click()
                 await self.page.wait_for_timeout(2000)
             else:
-                logger.warning("未能通过精确文字找到【我的/Mine】标签元素，尝试通过相关类名寻找...")
-                backup_tab = self.page.locator("span:has-text('我的'), span:has-text('Mine')").first
+                logger.warning("未能通过精确文字找到【我的/Mine/Following】标签元素，尝试通过相关类名寻找...")
+                backup_tab = self.page.locator("span:has-text('我的'), span:has-text('Mine'), span:has-text('关注'), span:has-text('Following')").first
                 if await backup_tab.is_visible():
                     await backup_tab.click()
                     await self.page.wait_for_timeout(2000)
+                else:
+                    raise RuntimeError("无法定位到目标标签页！可能是 UI 更改或登录状态（Cookie）已失效。")
         except Exception as e:
             logger.error(f"切换标签页时出错: {e}")
+            raise
 
     async def save_screenshot(self):
         await self.page.screenshot(path=config.SCREENSHOT_PATH)
