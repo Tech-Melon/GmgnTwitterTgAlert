@@ -497,14 +497,14 @@ class TelegramDistributor(BaseDistributor):
         
         has_video = any(m.get("type") == "video" for m in all_media)
         first_photo_url = next((m.get("url") for m in all_media if m.get("type") in ("photo", "image", "thumbnail") and m.get("url")), None)
+        photo_count = sum(1 for m in all_media if m.get("type") in ("photo", "image", "thumbnail") and m.get("url"))
 
         from . import config
         if handle and handle.lower() in config.BINANCE_SQUARE_HANDLES:
             # 币安广场无 FxTwitter 支持，直接使用首图（即便是视频封面）
             preview_url = first_photo_url or next((m.get("url") for m in all_media if m.get("url")), None)
-        elif not has_video and first_photo_url:
-            # 优化：如果有纯图片（无视频），为防止 FxTwitter 抓图失败（如Quote/Reply显示头像），
-            # 直接使用 WebSocket 底层抽取的真实图片直链作为预览。
+        elif not has_video and photo_count == 1 and first_photo_url:
+            # 单图：直链 100% 准确，避免 FxTwitter 抓图失败显示头像
             preview_url = first_photo_url
         else:
             if action in ("follow", "unfollow"):
