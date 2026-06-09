@@ -4,6 +4,7 @@ import os
 import signal
 import subprocess
 import time
+from typing import Any
 
 from loguru import logger
 from playwright.async_api import async_playwright
@@ -36,70 +37,104 @@ class MessageDeduplicator:
     """基于 internal_id 的消息去重器。
 
     策略：
-    - cp=0 或无 cp 字段（快照版）→ 暂存，启动 TIMEOUT 超时定时器。
-    - cp=1（完整版）→ 取消对应定时器，立即用完整版推送。
-    - 已推送过的 internal_id → 全局过滤（记录最近 1000 条），防止任何情况下的重复。
-    - 超时触发 → 用暂存的快照版推送（兜底）。
+    - TG 渠道：快照版立即推送，启动 5s 定时器。如果在 5s 内收到完整版，则触发 TG_UPDATE 以更新消息。
+    - DEFAULT（如飞书）：维持 0.8s 缓冲防抖逻辑。
     """
 
-    TIMEOUT = 0.5  # 500ms 等待完整版
+    TIMEOUT_FEISHU = 0.8  # 800ms 等待完整版
+    TIMEOUT_UPDATE = 5.0  # 5s 等待 TG 的完整版更新
 
     def __init__(self, publish_callback):
         self._publish = publish_callback
-        self._pending: dict[str, tuple[dict, asyncio.TimerHandle]] = {}
-        self._processed_ids: set[str] = set()
+        self._pending_feishu: dict[str, tuple[dict, asyncio.TimerHandle]] = {}
+        self._pending_update: dict[str, tuple[dict, asyncio.TimerHandle]] = {}
+        self._processed_feishu_ids: set[str] = set()
+        self._processed_tg_ids: set[str] = set()
         self._history_queue: list[str] = []
+        # 关键：持有 asyncio.Task 引用，防止 GC 回收导致协程中途消失
+        self._background_tasks: set[asyncio.Task] = set()
 
-    def _mark_processed(self, internal_id: str) -> None:
-        if not internal_id:
-            return
-        if internal_id not in self._processed_ids:
-            self._processed_ids.add(internal_id)
+    def _mark_history(self, internal_id: str) -> None:
+        if internal_id and internal_id not in self._history_queue:
             self._history_queue.append(internal_id)
             if len(self._history_queue) > 1000:
                 old_id = self._history_queue.pop(0)
-                self._processed_ids.discard(old_id)
+                self._processed_feishu_ids.discard(old_id)
+                self._processed_tg_ids.discard(old_id)
 
     def process(self, raw_item: dict) -> None:
         """处理一条原始 gmgn 数据项。"""
         internal_id = raw_item.get("i", "")
-        if internal_id in self._processed_ids:
-            return  # 已经成功推送过，忽略后续的重复消息
+        if not internal_id:
+            return
 
         cp = raw_item.get("cp")
 
-        if cp == 1:
-            # 完整版到达 → 取消定时器，用完整版推送
-            if internal_id in self._pending:
-                _, timer = self._pending.pop(internal_id)
-                timer.cancel()
-            self._mark_processed(internal_id)
-            self._dispatch(raw_item)
-            return
+        # --- 1. TG 实时推送 & 5s 更新逻辑 ---
+        if internal_id not in self._processed_tg_ids:
+            self._processed_tg_ids.add(internal_id)
+            self._mark_history(internal_id)
+            self._dispatch(raw_item, target="TG_FAST")
 
-        # cp=0 或无 cp 字段（快照版）→ 暂存并设超时
-        if internal_id and internal_id not in self._pending:
-            loop = asyncio.get_event_loop()
-            timer = loop.call_later(
-                self.TIMEOUT,
-                self._timeout_fallback,
-                internal_id,
-            )
-            self._pending[internal_id] = (raw_item, timer)
+            if cp != 1:
+                loop = asyncio.get_event_loop()
+                timer = loop.call_later(
+                    self.TIMEOUT_UPDATE,
+                    self._timeout_update,
+                    internal_id,
+                )
+                self._pending_update[internal_id] = (raw_item, timer)
+            else:
+                # cp=1 直接到达：完整版已在手，立即触发 TG_UPDATE 进行翻译编辑
+                self._dispatch(raw_item, target="TG_UPDATE")
 
-    def _timeout_fallback(self, internal_id: str) -> None:
+        elif cp == 1 and internal_id in self._pending_update:
+            _, timer = self._pending_update.pop(internal_id)
+            timer.cancel()
+            self._dispatch(raw_item, target="TG_UPDATE")
+
+        # --- 2. 其他默认渠道的 0.5s 延迟去重逻辑 ---
+        if internal_id not in self._processed_feishu_ids:
+            if cp == 1:
+                if internal_id in self._pending_feishu:
+                    _, timer = self._pending_feishu.pop(internal_id)
+                    timer.cancel()
+                self._processed_feishu_ids.add(internal_id)
+                self._mark_history(internal_id)
+                self._dispatch(raw_item, target="DEFAULT")
+            else:
+                if internal_id not in self._pending_feishu:
+                    loop = asyncio.get_event_loop()
+                    timer = loop.call_later(
+                        self.TIMEOUT_FEISHU,
+                        self._timeout_feishu,
+                        internal_id,
+                    )
+                    self._pending_feishu[internal_id] = (raw_item, timer)
+
+    def _timeout_feishu(self, internal_id: str) -> None:
         """超时兜底：完整版没来，用快照版推送，保证不丢消息。"""
-        if internal_id in self._pending:
-            raw_item, _ = self._pending.pop(internal_id)
-            logger.warning(f"⏱️ 去重等待完整版超时: {internal_id[:20]}... 使用快照兜底推送")
-            self._mark_processed(internal_id)
-            self._dispatch(raw_item)
+        if internal_id in self._pending_feishu:
+            raw_item, _ = self._pending_feishu.pop(internal_id)
+            logger.warning(f"⏱️ 默认渠道等待完整版超时: {internal_id[:20]}... 使用快照兜底推送")
+            self._processed_feishu_ids.add(internal_id)
+            self._mark_history(internal_id)
+            self._dispatch(raw_item, target="DEFAULT")
 
-    def _dispatch(self, raw_item: dict) -> None:
+    def _timeout_update(self, internal_id: str) -> None:
+        if internal_id in self._pending_update:
+            raw_item, _ = self._pending_update.pop(internal_id)
+            logger.info(f"⏱️ TG等待完整版更新超时(5s): {internal_id[:20]}... 使用快照更新TG")
+            self._dispatch(raw_item, target="TG_UPDATE")
+
+    def _dispatch(self, raw_item: dict, target: str) -> None:
         """标准化并推送消息。"""
         try:
             message = build_standardized_message(raw_item)
             standardized_msg = message.to_dict()
+            standardized_msg["_internal_id"] = raw_item.get("i", "")
+            standardized_msg["_dispatch_target"] = target
+
             log_tag = f"[{message.action.upper()}]"
             summary_text = (
                 f"{message.author.handle}: {message.content.text[:50]}..."
@@ -109,10 +144,50 @@ class MessageDeduplicator:
             if message.reference:
                 summary_text += f" (REF: @{message.reference.author_handle})"
 
-            logger.info(f"✨ 标准化推送 {log_tag} | {summary_text}")
-            asyncio.create_task(self._publish(standardized_msg))
+            summary_text += _build_delay_string(raw_item.get("ts", 0))
+
+            logger.info(f"✨ 标准化推送 ({target}) {log_tag} | {summary_text}")
+            task = asyncio.create_task(self._publish(standardized_msg))
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
         except Exception as e:
             logger.error(f"❌ 数据标准化失败: {e}")
+
+
+def _build_delay_string(raw_ts: Any) -> str:
+    if not raw_ts:
+        return ""
+    try:
+        ts_ms = int(raw_ts)
+        is_ms_timestamp = ts_ms > 9_999_999_999
+        ts_sec = ts_ms / 1000.0 if is_ms_timestamp else float(ts_ms)
+        ms_part = ts_ms % 1000 if is_ms_timestamp else 0
+        
+        # 1. 源端时间
+        ts_str = time.strftime('%H:%M:%S', time.localtime(ts_sec))
+        if is_ms_timestamp:
+            ts_str += f".{ms_part:03d}"
+            
+        # 2. 本机收到时间
+        recv_time = time.time()
+        recv_str = time.strftime('%H:%M:%S', time.localtime(recv_time))
+        recv_ms_part = int((recv_time - int(recv_time)) * 1000)
+        recv_str += f".{recv_ms_part:03d}"
+            
+        # 3. 延迟计算
+        delay_ms = (recv_time - ts_sec) * 1000
+        return f" [GMGN抓取发推时间: {ts_str} | 服务器收到时间: {recv_str} | 端到端耗时: {delay_ms:.0f}ms]"
+    except (ValueError, TypeError):
+        pass
+    return ""
+
+def _format_delay_info(parsed: dict) -> str:
+    try:
+        if "data" in parsed and isinstance(parsed["data"], list) and len(parsed["data"]) > 0:
+            return _build_delay_string(parsed["data"][0].get("ts", 0))
+    except Exception:
+        pass
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -209,7 +284,8 @@ async def main():
                     if not parsed:
                         return
 
-                    logger.info(f"📦 原始解析消息: {json.dumps(parsed, ensure_ascii=False)}")
+                    delay_info = _format_delay_info(parsed)
+                    logger.info(f"📦 原始解析消息: {json.dumps(parsed, ensure_ascii=False)}{delay_info}")
 
                     triggers_map = extract_triggers_map(parsed["data"])
                     for item in parsed["data"]:
@@ -264,7 +340,8 @@ async def main():
                             parsed = parse_socketio_payload(msg_content)
                             if parsed:
                                 watchdog.feed()
-                                logger.info(f"📦 原始解析消息(Polling): {json.dumps(parsed, ensure_ascii=False)}")
+                                delay_info = _format_delay_info(parsed)
+                                logger.info(f"📦 原始解析消息(Polling): {json.dumps(parsed, ensure_ascii=False)}{delay_info}")
                                 triggers_map = extract_triggers_map(parsed["data"])
                                 for item in parsed["data"]:
                                     deduplicator.process(item)

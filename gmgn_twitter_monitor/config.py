@@ -7,7 +7,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
 
 FIRST_RUN_LOGIN = False
-AUTH_URL = "https://gmgn.ai/tglogin?user_id=53b06598-3e2b-4d2f-aec6-f2e5881def90&code=7074fc4c-080d-498b-baf4-936349f3d155&id=0eae54fb142533ac"
+AUTH_URL = "https://gmgn.ai/tglogin?user_id=53b06598-3e2b-4d2f-aec6-f2e5881def90&code=2de464bb-1737-4c9f-823d-b7544dadc92e&id=0eae54fb142533ac"
 
 LOG_FILE = str(BASE_DIR / "twitter_monitor.log")
 USER_DATA_DIR = str(BASE_DIR / "browser_data")
@@ -99,3 +99,10 @@ WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 DEEPSEEK_MODEL = "deepseek-chat"
+
+# ---------- AI 分析（赛道分类 + 摘要 + 翻译）----------
+AI_ANALYZE_HANDLES: set[str] = {
+    h.strip().lower()
+    for h in os.getenv("AI_ANALYZE_HANDLES", "").split(",")
+    if h.strip()
+}

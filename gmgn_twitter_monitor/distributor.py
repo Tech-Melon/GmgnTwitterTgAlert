@@ -147,6 +147,8 @@ class TelegramDistributor(BaseDistributor):
         self.filter_handles = [h.lower() for h in (filter_handles or [])]
         self.api_base = f"https://api.telegram.org/bot{bot_token}"
         self._session: aiohttp.ClientSession | None = None
+        # Future 用于解决 TG_FAST 与 TG_UPDATE 的竞态条件
+        self._msg_history: dict[str, asyncio.Future] = {}
 
     async def start(self):
         if not self.bot_token or (not self.default_channel_id and not self.channel_map):
@@ -192,6 +194,36 @@ class TelegramDistributor(BaseDistributor):
         if count >= 1_000:
             return f" · {count / 1_000:.1f}K 粉丝"
         return f" · {count} 粉丝"
+
+    @staticmethod
+    def _build_tweet_url(message: dict, handle: str, action: str) -> str:
+        """根据消息类型构建 Twitter 帖子原文链接（x.com 真实链接）。"""
+        tweet_id = message.get("tweet_id", "")
+        reference = message.get("reference") or {}
+        ref_handle = reference.get("author_handle")
+        ref_tweet_id = reference.get("tweet_id")
+
+        if action in ("tweet", "reply", "quote", "pin", "unpin"):
+            if tweet_id and handle:
+                return f"https://x.com/{handle}/status/{tweet_id}"
+        elif action == "repost":
+            if ref_handle and ref_tweet_id:
+                return f"https://x.com/{ref_handle}/status/{ref_tweet_id}"
+            elif tweet_id and handle:
+                return f"https://x.com/{handle}/status/{tweet_id}"
+        elif action == "delete_post":
+            if ref_handle and ref_tweet_id:
+                return f"https://x.com/{ref_handle}/status/{ref_tweet_id}"
+            elif tweet_id and handle:
+                return f"https://x.com/{handle}/status/{tweet_id}"
+        elif action in ("follow", "unfollow"):
+            t_handle = message.get("unfollow_target", {}).get("handle")
+            if t_handle:
+                return f"https://x.com/{t_handle}"
+        elif action in ("photo", "description", "name"):
+            if handle:
+                return f"https://x.com/{handle}"
+        return ""
 
     def _format_message(self, msg: dict, include_text: bool = True) -> str:
         """将标准化 JSON 组装为 TG HTML 头部。"""
@@ -345,8 +377,14 @@ class TelegramDistributor(BaseDistributor):
         ref_text = translated_dict.get("reference") or text_parts.get("reference", "")
         bio_text = translated_dict.get("bio") or text_parts.get("bio", "")
 
-        # 判断内容是否真的有改变
-        if (main_text == text_parts.get("content", "") and 
+        # 提取分析字段（analyzer 返回时会包含 category / summary）
+        category = translated_dict.get("category", "")
+        summary = translated_dict.get("summary", "")
+
+        # 判断内容是否真的有改变（分析结果也算改变）
+        has_analysis = bool(category or summary)
+        if (not has_analysis and
+            main_text == text_parts.get("content", "") and 
             ref_text == text_parts.get("reference", "") and 
             bio_text == text_parts.get("bio", "")):
             logger.info(f"🌐 翻译结果与原文相同，跳过编辑: {target_channel_id}")
@@ -367,6 +405,17 @@ class TelegramDistributor(BaseDistributor):
                     escaped += f"\n(<i>{self._escape_html(orig_clean)}</i>)"
             return escaped
 
+        # ──── 组装分析区块（置顶） ────
+        analysis_block = ""
+        if has_analysis:
+            analysis_lines = []
+            if category:
+                analysis_lines.append(f"🏷️ 赛道: <b>{self._escape_html(category)}</b>")
+            if summary:
+                analysis_lines.append(f"📋 摘要: {self._escape_html(summary)}")
+            analysis_content = "\n".join(analysis_lines)
+            analysis_block = f"<blockquote>{analysis_content}</blockquote>\n\n"
+
         translated_html_parts = []
         if main_text or bio_text:
             t_text = main_text if main_text else bio_text
@@ -379,8 +428,8 @@ class TelegramDistributor(BaseDistributor):
 
         translated_html = "\n\n".join(translated_html_parts)
         
-        separator = "—— 🌐 中文翻译 ——\n"
-        new_text = f"{header_no_text}\n\n{separator}{translated_html}\n\n{footer}"
+        separator = "—— 🌐 中文翻译 ——\n" if not has_analysis else "—— 🧠 AI 分析 + 翻译 ——\n"
+        new_text = f"{header_no_text}\n\n{separator}{analysis_block}{translated_html}\n\n{footer}"
 
         handle = message.get("author", {}).get("handle", "?")
 
@@ -397,7 +446,8 @@ class TelegramDistributor(BaseDistributor):
         result = await self._send_api("editMessageText", payload)
 
         if result and result.get("ok"):
-            logger.info(f"🌐 TG 翻译追加成功: @{handle} -> {target_channel_id}")
+            log_tag = "🧠 TG 分析+翻译" if has_analysis else "🌐 TG 翻译"
+            logger.info(f"{log_tag}追加成功: @{handle} -> {target_channel_id}")
         else:
             logger.warning(f"🌐 TG 翻译追加失败: @{handle} -> {target_channel_id}")
 
@@ -422,11 +472,16 @@ class TelegramDistributor(BaseDistributor):
                     logger.info(f"📱 TG 头像变更推送成功: @{handle} -> {target_channel_id} | {time_log_str}")
                 return None  # photo 动作不需要后续翻译编辑
 
-        # ──── 计算时间尾部 ────
+        # ──── 计算时间尾部 + 帖子链接 ────
         tz_cst = timezone(timedelta(hours=8))
         ts = message.get("timestamp", 0)
         tweet_time = datetime.fromtimestamp(ts, tz=tz_cst).strftime("%Y-%m-%d %H:%M:%S") if ts else "未知"
         footer = f"🕒 推文时间: {tweet_time}"
+
+        # 附带帖子原文链接
+        tweet_url = self._build_tweet_url(message, handle, action)
+        if tweet_url:
+            footer += f"\n🔗 <a href=\"{tweet_url}\">查看原文</a>"
 
         # ──── 头部与正文 ────
         header = self._format_message(message)
@@ -528,7 +583,16 @@ class TelegramDistributor(BaseDistributor):
         return None
 
     async def _pre_translate(self, message: dict) -> dict[str, str] | None:
-        """翻译一次，供所有频道复用。"""
+        """翻译一次，供所有频道复用。
+        
+        优先 await Hub 层创建的共享分析 Task（与推送原文并发，不阻塞）；
+        若无 Task 则走原 translator 纯翻译链路。
+        """
+        # 优先 await Hub 层创建的共享分析 Task
+        analysis_task = message.get("_ai_analysis_task")
+        if analysis_task is not None:
+            return await analysis_task
+
         content = message.get("content", {}) or {}
         reference = message.get("reference") or {}
         bio_change = message.get("bio_change") or {}
@@ -554,6 +618,38 @@ class TelegramDistributor(BaseDistributor):
 
         handle = message.get("author", {}).get("handle", "?")
         action = message.get("action", "")
+        target = message.get("_dispatch_target")
+        internal_id = message.get("_internal_id")
+
+        if target == "TG_UPDATE":
+            if not internal_id or internal_id not in self._msg_history:
+                logger.warning(f"📱 TG_UPDATE 找不到 _msg_history: {internal_id[:20] if internal_id else 'None'}")
+                return
+
+            # await Future：等待 TG_FAST 的推送完成，拿到 msg_id
+            push_contexts = await self._msg_history[internal_id]
+            if not push_contexts:
+                logger.warning(f"📱 TG_UPDATE push_contexts 为空，跳过编辑")
+                return
+
+            translate_task = self._pre_translate(message)
+            translate_result = await translate_task if translate_task else None
+
+            if not translate_result or isinstance(translate_result, Exception):
+                logger.warning(f"📱 TG_UPDATE 翻译结果为空或异常，跳过编辑")
+                return
+
+            edit_tasks = []
+            for r in push_contexts:
+                edit_tasks.append(
+                    self._translate_and_edit(
+                        r["msg_id"], r["header_no_text"], r["footer"],
+                        message, translate_result, r["channel_id"], r["link_preview_options"]
+                    )
+                )
+            if edit_tasks:
+                await asyncio.gather(*edit_tasks, return_exceptions=True)
+            return
 
         # 核心：动态路由
         h_lower = handle.lower()
@@ -572,6 +668,34 @@ class TelegramDistributor(BaseDistributor):
         push_time = datetime.now(tz=tz_cst).strftime("%Y-%m-%d %H:%M:%S")
         time_log_str = f"| 🕐 推文时间: {tweet_time} 📡 推送时间: {push_time}"
 
+        if target == "TG_FAST":
+            # 立即创建 Future，让 TG_UPDATE 可以 await 等待推送完成
+            if internal_id and internal_id not in self._msg_history:
+                self._msg_history[internal_id] = asyncio.get_event_loop().create_future()
+                # 滚动清理
+                if len(self._msg_history) > 1000:
+                    oldest_key = next(iter(self._msg_history))
+                    old_future = self._msg_history.pop(oldest_key)
+                    if not old_future.done():
+                        old_future.set_result([])
+
+            push_tasks = [
+                self._distribute_to_channel(message, handle, action, cid, time_log_str)
+                for cid in target_channel_ids
+            ]
+            try:
+                all_results = await asyncio.gather(*push_tasks, return_exceptions=True)
+                valid_push_contexts = [r for r in all_results if isinstance(r, dict) and "msg_id" in r]
+            except Exception:
+                valid_push_contexts = []
+
+            # 设置 Future 结果，解除 TG_UPDATE 的 await 阻塞
+            if internal_id and internal_id in self._msg_history:
+                future = self._msg_history[internal_id]
+                if not future.done():
+                    future.set_result(valid_push_contexts)
+            return
+
         # ──── 阶段 1：推送原文 + 翻译 并发执行 ────
         # 推送任务列表
         push_tasks = [
@@ -583,12 +707,22 @@ class TelegramDistributor(BaseDistributor):
 
         # 并发：所有频道推送 + DeepSeek 翻译 同时执行
         all_results = await asyncio.gather(
-            *push_tasks, translate_task, return_exceptions=True
+            *push_tasks, translate_task if translate_task else asyncio.sleep(0), return_exceptions=True
         )
 
         # 拆分结果：前 N 个是推送结果，最后一个是翻译结果
         push_results = all_results[:-1]
         translate_result = all_results[-1]
+
+        valid_push_contexts = []
+        for r in push_results:
+            if isinstance(r, dict) and "msg_id" in r:
+                valid_push_contexts.append(r)
+
+        if internal_id and valid_push_contexts:
+            self._msg_history[internal_id] = valid_push_contexts
+            if len(self._msg_history) > 1000:
+                self._msg_history.pop(next(iter(self._msg_history)))
 
         # ──── 阶段 2：翻译完成后，批量编辑所有频道 ────
         if isinstance(translate_result, Exception):
@@ -599,9 +733,7 @@ class TelegramDistributor(BaseDistributor):
 
         translated_dict = translate_result
         edit_tasks = []
-        for r in push_results:
-            if isinstance(r, Exception) or r is None:
-                continue
+        for r in valid_push_contexts:
             edit_tasks.append(
                 self._translate_and_edit(
                     r["msg_id"], r["header_no_text"], r["footer"],
@@ -630,6 +762,11 @@ class FeishuDistributor(BaseDistributor):
         self._session: aiohttp.ClientSession | None = None
         self._tenant_access_token: str = ""
         self._token_expire_time: float = 0
+
+    @staticmethod
+    async def _await_shared_task(task):
+        """安全地 await Hub 层的共享 asyncio.Task。"""
+        return await task
 
     async def start(self):
         if not self.default_webhook and not self.channel_map:
@@ -740,6 +877,19 @@ class FeishuDistributor(BaseDistributor):
         action_text, color = action_map.get(action, (f"❓ {action}", "blue"))
 
         lines = []
+
+        # ──── AI 分析区块（置顶） ────
+        category = translated_dict.get("category", "")
+        summary = translated_dict.get("summary", "")
+        if category or summary:
+            lines.append("━━━━━ 📊 AI 智能分析 ━━━━━")
+            if category:
+                lines.append(f"🏷️ 赛道: **{category}**")
+            if summary:
+                lines.append(f"📋 摘要: **{summary}**")
+            lines.append("━━━━━━━━━━━━━━━━━━━━")
+            lines.append("")
+
         lines.append(f"👤 [{author_name} @{handle}](https://x.com/{handle}) · *{followers_str} 粉丝*")
         lines.append("---")
         
@@ -805,11 +955,31 @@ class FeishuDistributor(BaseDistributor):
             clean_ref = ref_text.replace('\n', '  ')
             lines.append(f"> *{clean_ref}*")
 
-        # Links
+        # Links — 根据 action 类型构建帖子原文链接
+        action = msg.get("action", "")
         tweet_id = msg.get("tweet_id")
-        if tweet_id:
+        tweet_url = ""
+        if action in ("tweet", "reply", "quote", "pin", "unpin"):
+            if tweet_id:
+                tweet_url = f"https://x.com/{handle}/status/{tweet_id}"
+        elif action in ("repost", "delete_post"):
+            r = msg.get("reference") or {}
+            rh = r.get("author_handle")
+            rt = r.get("tweet_id")
+            if rh and rt:
+                tweet_url = f"https://x.com/{rh}/status/{rt}"
+            elif tweet_id:
+                tweet_url = f"https://x.com/{handle}/status/{tweet_id}"
+        elif action in ("follow", "unfollow"):
+            t_h = (msg.get("unfollow_target") or {}).get("handle")
+            if t_h:
+                tweet_url = f"https://x.com/{t_h}"
+        elif action in ("photo", "description", "name"):
+            tweet_url = f"https://x.com/{handle}"
+        
+        if tweet_url:
             lines.append("---")
-            lines.append(f"[🔗 原文链接](https://fxtwitter.com/{handle}/status/{tweet_id})")
+            lines.append(f"[🔗 原文链接]({tweet_url})")
 
         return action_text, color, "\n".join(lines)
 
@@ -887,8 +1057,13 @@ class FeishuDistributor(BaseDistributor):
 
         translate_task = None
         if text_parts:
-            from .translator import translate_texts
-            translate_task = translate_texts(text_parts)
+            # 优先 await Hub 层创建的共享分析 Task
+            analysis_task = message.get("_ai_analysis_task")
+            if analysis_task is not None:
+                translate_task = asyncio.ensure_future(self._await_shared_task(analysis_task))
+            else:
+                from .translator import translate_texts
+                translate_task = translate_texts(text_parts)
             
         upload_tasks = [self._upload_image(url) for url in photo_urls]
 
@@ -1013,6 +1188,7 @@ class DistributorHub:
 
     def __init__(self, distributors: list[BaseDistributor] | None = None):
         self.distributors = distributors or []
+        self._shared_translation_tasks = {}
 
     async def start_all(self) -> None:
         """依次启动所有分发器。"""
@@ -1031,12 +1207,64 @@ class DistributorHub:
                 logger.error(f"❌ 分发器停止失败: {type(d).__name__} - {e}")
 
     async def publish(self, message: dict) -> None:
-        """将消息广播到所有分发器（并发执行，单个失败不影响其余）。"""
-        tasks = [distributor.distribute(message) for distributor in self.distributors]
+        """将消息广播到所有分发器（并发执行，单个失败不影响其余）。
+        
+        对 AI_ANALYZE_HANDLES 中的 handle，创建共享的分析 Task（不阻塞），
+        注入 message['_ai_analysis_task']，供 TG/飞书分发器在各自的并发流程中 await。
+        这样推送原文不会被分析阻塞，保持“先发后改”的低延迟策略。
+        """
+        target = message.get("_dispatch_target", "DEFAULT")
+
+        # ──── 创建共享分析 Task（不 await，与推送原文并发） ────
+        from . import config as cfg
+        handle = message.get("author", {}).get("handle", "").lower()
+        if handle in cfg.AI_ANALYZE_HANDLES and target != "TG_FAST":
+            content = message.get("content", {}) or {}
+            reference = message.get("reference") or {}
+            bio_change = message.get("bio_change") or {}
+            text_parts = {}
+            if content.get("text"):
+                text_parts["content"] = content["text"]
+            if reference.get("text"):
+                text_parts["reference"] = reference["text"]
+            if bio_change.get("after"):
+                text_parts["bio"] = bio_change["after"]
+
+            if text_parts:
+                content_hash = hash(json.dumps(text_parts, sort_keys=True))
+                if content_hash in self._shared_translation_tasks:
+                    message["_ai_analysis_task"] = self._shared_translation_tasks[content_hash]
+                else:
+                    from .analyzer import analyze_tweet
+                    logger.info(f"🧠 Hub: 创建 @{handle} 的共享分析 Task ({target})")
+                    # 创建 Task 但不 await，多个分发器可以安全地 await 同一个 Task
+                    task = asyncio.create_task(analyze_tweet(text_parts, handle=handle))
+                    self._shared_translation_tasks[content_hash] = task
+                    # 确保执行完成后从共享字典中移除，避免内存泄漏
+                    task.add_done_callback(lambda t: self._shared_translation_tasks.pop(content_hash, None))
+                    message["_ai_analysis_task"] = task
+
+        tasks = []
+        task_distributors = []  # 记录实际参与分发的 distributor，与 tasks 一一对应
+        for distributor in self.distributors:
+            is_tg = isinstance(distributor, TelegramDistributor)
+            if target == "TG_FAST":
+                if is_tg:
+                    tasks.append(distributor.distribute(message))
+                    task_distributors.append(distributor)
+            elif target == "TG_UPDATE":
+                if is_tg:
+                    tasks.append(distributor.distribute(message))
+                    task_distributors.append(distributor)
+            elif target == "DEFAULT":
+                if not is_tg:
+                    tasks.append(distributor.distribute(message))
+                    task_distributors.append(distributor)
+
         if not tasks:
             return
             
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        for distributor, result in zip(self.distributors, results):
+        for distributor, result in zip(task_distributors, results):
             if isinstance(result, Exception):
                 logger.error(f"❌ 分发失败: {type(distributor).__name__} - {result}")
