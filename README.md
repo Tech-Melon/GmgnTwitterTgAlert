@@ -5,7 +5,7 @@
 ### ✨ 核心特性
 
 - **全动作捕获**：覆盖发推、转推、回复、引用、关注/取关、删帖、换头像、改昵称、改简介、置顶/取消置顶共 12 种推特行为
-- **FxTwitter / vxTwitter 富文本卡片**：推文自动渲染为带图/视频的嵌入式预览卡片，关注/取关等主页类动作自动渲染为用户名片
+- **智能图文预览**：纯图推文优先使用原图直链确保 100% 准确预览，含视频推文通过 FxTwitter 实现内嵌播放，关注/取关等主页类动作通过 vxTwitter 渲染为用户名片
 - **DeepSeek 实时翻译与 AI 分析**：非阻塞异步翻译，推送完成后自动追加中文译文。支持对指定博主进行投资赛道分析（如 A 股股票名称代码提取）与智能摘要
 - **多频道智能路由**：按推特 Handle 分组路由到不同 Telegram 频道，同一博主可同时推送至多个频道
 - **双轨数据捕获**：WebSocket 实时监听 + HTTP Polling 降级拦截，重连间隙零丢失
@@ -36,11 +36,12 @@ GmgnTwitterClaw/
 │   ├── app.py                     # 主循环：浏览器启动 + WS/Polling 双轨拦截 + 去重引擎
 │   ├── browser.py                 # Playwright 浏览器生命周期管理（启动/登录/截图/恢复）
 │   ├── config.py                  # 配置中心：从 .env 读取环境变量 + 路由分组解析
-│   ├── distributor.py             # 四大分发器：Logging / Telegram / WebSocket / Webhook
+│   ├── distributor.py             # 五大分发器：Logging / Telegram / Feishu / WebSocket / Webhook
+│   ├── analyzer.py                # DeepSeek AI 深度分析（赛道分类/摘要/A股提取/翻译）
 │   ├── logging_setup.py           # loguru 日志格式化
 │   ├── models.py                  # StandardizedMessage 数据模型（dataclass）
 │   ├── parser.py                  # 原始 WS 数据 → 标准化 JSON 转换器
-│   ├── translator.py              # DeepSeek 异步翻译引擎
+│   ├── translator.py              # DeepSeek 异步翻译引擎（纯翻译链路）
 │   └── watchdog.py                # 看门狗：超时无数据自动刷新页面
 ├── gmgn_twitter_monitor.py        # 兼容入口（等价于 python -m gmgn_twitter_monitor）
 ├── ctl.py                         # 交互式运维控制台（服务管理/日志查看/截图等）
@@ -287,7 +288,7 @@ sudo nginx -t && sudo systemctl reload nginx
 
 ### Telegram 推送特性
 
-- **FxTwitter 推文卡片**：发推、转推、回复、引用等动作自动通过 `fxtwitter.com` 渲染为带图/视频的嵌入式预览
+- **智能图片预览**：纯图推文直接使用 WebSocket 底层提取的真实图片直链 (`pbs.twimg.com`) 作为 `link_preview_options.url`，100% 准确展示原图（多图时展示首图）；含视频推文自动降级到 `fxtwitter.com` 实现内嵌播放
 - **vxTwitter 主页名片**：关注、取关、改昵称、改简介等动作自动通过 `vxtwitter.com` 渲染为用户头像+简介的名片卡
 - **原帖直达链接**：卡片底部统一附带 `x.com` 原帖/主页链接，支持点击直达
 - **换头像对比图**：头像变更动作保留原生 `sendMediaGroup`，展示新旧头像的并列对比

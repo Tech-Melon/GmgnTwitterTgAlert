@@ -68,7 +68,7 @@ This is a Playwright-based GMGN Twitter monitor that runs a persistent Chromium 
 - `gmgn_twitter_monitor/distributor.py`: fan-out layer for normalized messages. Includes:
   - `LoggingDistributor` for debug logging.
   - `WebSocketDistributor` for authenticated broadcast to connected clients.
-  - `TelegramDistributor` for TG channel alerts (supports rich media via `sendPhoto`/`sendMediaGroup`, smart image grouping, multi-action formatting, original post links, and asynchronous translation/analysis appending).
+  - `TelegramDistributor` for TG channel alerts (uses `sendMessage` with `link_preview_options` for text+preview, `sendMediaGroup` only for avatar comparisons. For photo-only tweets, uses raw image URLs directly; for video tweets, falls back to FxTwitter. Supports multi-action formatting, original post links, and asynchronous translation/analysis appending).
   - `WebhookDistributor` for HTTP POST integrations.
   - `DistributorHub` to publish to multiple distributors simultaneously.
 - `gmgn_twitter_monitor/translator.py`: async DeepSeek translation module (low temperature, strict prompts) to translate English tweets to Chinese, skipping naturally Chinese text.
