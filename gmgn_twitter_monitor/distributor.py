@@ -225,6 +225,85 @@ class TelegramDistributor(BaseDistributor):
                 return f"https://x.com/{handle}"
         return ""
 
+    def _compute_link_preview_options(self, message: dict, handle: str, action: str) -> dict:
+        """根据消息数据计算 TG link_preview_options（预览链接 + 是否禁用）。
+
+        该方法可在 TG_FAST 和 TG_UPDATE 中复用，确保 cp=1 编辑时
+        能用完整 reference 数据重新计算出正确的预览链接。
+        """
+        content = message.get("content", {}) or {}
+        reference = message.get("reference") or {}
+        all_media = (content.get("media") or []) + (reference.get("media") or [])
+
+        has_video = any(m.get("type") == "video" for m in all_media)
+        first_photo_url = next(
+            (m.get("url") for m in all_media
+             if m.get("type") in ("photo", "image", "thumbnail") and m.get("url")),
+            None,
+        )
+        photo_count = sum(
+            1 for m in all_media
+            if m.get("type") in ("photo", "image", "thumbnail") and m.get("url")
+        )
+
+        preview_url = None
+        disable_preview = False
+
+        from . import config
+        if handle and handle.lower() in config.BINANCE_SQUARE_HANDLES:
+            preview_url = first_photo_url or next(
+                (m.get("url") for m in all_media if m.get("url")), None
+            )
+            if not preview_url:
+                disable_preview = True
+        elif not has_video and photo_count == 1 and first_photo_url:
+            preview_url = first_photo_url
+        else:
+            if action in ("follow", "unfollow"):
+                t_handle = message.get("unfollow_target", {}).get("handle")
+                if t_handle:
+                    preview_url = f"https://vxtwitter.com/{t_handle}"
+            elif action == "repost":
+                ref_handle = reference.get("author_handle")
+                ref_tweet_id = reference.get("tweet_id")
+                if ref_handle and ref_tweet_id:
+                    preview_url = f"https://fxtwitter.com/{ref_handle}/status/{ref_tweet_id}"
+                elif message.get("tweet_id") and handle:
+                    preview_url = f"https://fxtwitter.com/{handle}/status/{message.get('tweet_id')}"
+            elif action in ("reply", "quote"):
+                ref_handle = reference.get("author_handle")
+                ref_tweet_id = reference.get("tweet_id")
+                has_content_media = len(content.get("media") or []) > 0
+                if has_content_media and message.get("tweet_id") and handle:
+                    preview_url = f"https://fxtwitter.com/{handle}/status/{message.get('tweet_id')}"
+                elif ref_handle and ref_tweet_id:
+                    preview_url = f"https://fxtwitter.com/{ref_handle}/status/{ref_tweet_id}"
+                else:
+                    tweet_id = message.get("tweet_id", "")
+                    if tweet_id and handle:
+                        preview_url = f"https://fxtwitter.com/{handle}/status/{tweet_id}"
+            elif action == "delete_post":
+                ref_handle = reference.get("author_handle")
+                ref_tweet_id = reference.get("tweet_id")
+                if ref_handle and ref_tweet_id:
+                    preview_url = f"https://fxtwitter.com/{ref_handle}/status/{ref_tweet_id}"
+                else:
+                    tweet_id = message.get("tweet_id", "")
+                    if tweet_id and handle:
+                        preview_url = f"https://fxtwitter.com/{handle}/status/{tweet_id}"
+            elif action in ("tweet", "pin", "unpin"):
+                tweet_id = message.get("tweet_id", "")
+                if tweet_id and handle:
+                    preview_url = f"https://fxtwitter.com/{handle}/status/{tweet_id}"
+            else:
+                if handle:
+                    preview_url = f"https://vxtwitter.com/{handle}"
+
+        lpo = {"is_disabled": disable_preview, "prefer_large_media": True}
+        if preview_url:
+            lpo["url"] = preview_url
+        return lpo
+
     def _format_message(self, msg: dict, include_text: bool = True) -> str:
         """将标准化 JSON 组装为 TG HTML 头部。"""
         action = msg.get("action", "unknown")
@@ -487,78 +566,8 @@ class TelegramDistributor(BaseDistributor):
         header = self._format_message(message)
         initial_text = f"{header}\n\n{footer}"
         
-        # ──── 动态计算预览链接 (优先提取直链，降级使用 FxTwitter) ────
-        preview_url = None
-        
-        # 1. 解析所有媒体资源
-        content = message.get("content", {}) or {}
-        reference = message.get("reference") or {}
-        all_media = (content.get("media") or []) + (reference.get("media") or [])
-        
-        has_video = any(m.get("type") == "video" for m in all_media)
-        first_photo_url = next((m.get("url") for m in all_media if m.get("type") in ("photo", "image", "thumbnail") and m.get("url")), None)
-        photo_count = sum(1 for m in all_media if m.get("type") in ("photo", "image", "thumbnail") and m.get("url"))
-
-        from . import config
-        disable_preview = False
-        if handle and handle.lower() in config.BINANCE_SQUARE_HANDLES:
-            # 币安广场无 FxTwitter 支持，直接使用首图（即便是视频封面）
-            preview_url = first_photo_url or next((m.get("url") for m in all_media if m.get("url")), None)
-            if not preview_url:
-                # 无媒体时禁用预览，防止 TG 自动抓取 x.com 链接显示误导性头像
-                disable_preview = True
-        elif not has_video and photo_count == 1 and first_photo_url:
-            # 单图：直链 100% 准确，避免 FxTwitter 抓图失败显示头像
-            preview_url = first_photo_url
-        else:
-            if action in ("follow", "unfollow"):
-                t_handle = message.get("unfollow_target", {}).get("handle")
-                if t_handle:
-                    preview_url = f"https://vxtwitter.com/{t_handle}"
-            elif action == "repost":
-                reference = message.get("reference") or {}
-                ref_handle = reference.get("author_handle")
-                ref_tweet_id = reference.get("tweet_id")
-                if ref_handle and ref_tweet_id:
-                    preview_url = f"https://fxtwitter.com/{ref_handle}/status/{ref_tweet_id}"
-                elif message.get("tweet_id") and handle:
-                    preview_url = f"https://fxtwitter.com/{handle}/status/{message.get('tweet_id')}"
-            elif action in ("reply", "quote"):
-                reference = message.get("reference") or {}
-                ref_handle = reference.get("author_handle")
-                ref_tweet_id = reference.get("tweet_id")
-                content = message.get("content") or {}
-                has_media = len(content.get("media") or []) > 0
-                
-                if has_media and message.get("tweet_id") and handle:
-                    preview_url = f"https://fxtwitter.com/{handle}/status/{message.get('tweet_id')}"
-                elif ref_handle and ref_tweet_id:
-                    preview_url = f"https://fxtwitter.com/{ref_handle}/status/{ref_tweet_id}"
-                else:
-                    tweet_id = message.get("tweet_id", "")
-                    if tweet_id and handle:
-                        preview_url = f"https://fxtwitter.com/{handle}/status/{tweet_id}"
-            elif action == "delete_post":
-                reference = message.get("reference") or {}
-                ref_handle = reference.get("author_handle")
-                ref_tweet_id = reference.get("tweet_id")
-                if ref_handle and ref_tweet_id:
-                    preview_url = f"https://fxtwitter.com/{ref_handle}/status/{ref_tweet_id}"
-                else:
-                    tweet_id = message.get("tweet_id", "")
-                    if tweet_id and handle:
-                        preview_url = f"https://fxtwitter.com/{handle}/status/{tweet_id}"
-            elif action in ("tweet", "pin", "unpin"):
-                tweet_id = message.get("tweet_id", "")
-                if tweet_id and handle:
-                    preview_url = f"https://fxtwitter.com/{handle}/status/{tweet_id}"
-            else:
-                if handle:
-                    preview_url = f"https://vxtwitter.com/{handle}"
-
-        link_preview_options = {"is_disabled": disable_preview, "prefer_large_media": True}
-        if preview_url:
-            link_preview_options["url"] = preview_url
+        # ──── 动态计算预览链接 (统一由 _compute_link_preview_options 计算) ────
+        link_preview_options = self._compute_link_preview_options(message, handle, action)
 
         payload = {
             "chat_id": target_channel_id,
@@ -647,12 +656,15 @@ class TelegramDistributor(BaseDistributor):
                 logger.warning(f"📱 TG_UPDATE 翻译结果为空或异常，跳过编辑")
                 return
 
+            # 使用 cp=1 完整数据重新计算预览链接（TG_FAST cp=0 可能缺少 reference）
+            updated_lpo = self._compute_link_preview_options(message, handle, action)
+
             edit_tasks = []
             for r in push_contexts:
                 edit_tasks.append(
                     self._translate_and_edit(
                         r["msg_id"], r["header_no_text"], r["footer"],
-                        message, translate_result, r["channel_id"], r["link_preview_options"]
+                        message, translate_result, r["channel_id"], updated_lpo
                     )
                 )
             if edit_tasks:
@@ -1000,10 +1012,20 @@ class FeishuDistributor(BaseDistributor):
                 payload["sign"] = self._gen_sign(secret, timestamp)
             
             async with self._session.post(webhook, json=payload) as resp:
+                body = await resp.text()
                 if resp.status < 300:
+                    # 飞书 webhook 可能 HTTP 200 但业务层返回错误码
+                    try:
+                        resp_data = json.loads(body)
+                        code = resp_data.get("code", resp_data.get("StatusCode", 0))
+                        if code != 0:
+                            msg = resp_data.get("msg") or resp_data.get("StatusMessage", "")
+                            logger.error(f"📱 飞书推送业务失败: @{handle} [code={code}]: {msg} | webhook={webhook[-20:]}")
+                            return
+                    except (json.JSONDecodeError, ValueError):
+                        pass
                     logger.info(f"📱 飞书推送成功: @{handle} {time_log_str}")
                 else:
-                    body = await resp.text()
                     logger.error(f"📱 飞书推送失败: @{handle} [{resp.status}]: {body[:200]}")
         except Exception as e:
             logger.error(f"📱 飞书推送异常: @{handle} - {e}")
