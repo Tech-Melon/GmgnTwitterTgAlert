@@ -60,14 +60,15 @@ This is a Playwright-based GMGN Twitter monitor that runs a persistent Chromium 
 
 ### Module responsibilities
 - `gmgn_twitter_monitor/config.py`: all runtime configuration lives here, including URLs, browser state paths, proxy, watchdog timing, screenshot path, downstream WebSocket settings, Telegram Bot configs, and DeepSeek translator settings.
-- `gmgn_twitter_monitor/app.py`: orchestrates the lifecycle and handles `MessageDeduplicator` (buffers `cp=0` snapshots for 500ms to wait for `cp=1` complete payloads to avoid duplicate pushes and missing text).
+- `gmgn_twitter_monitor/app.py`: orchestrates the lifecycle and handles `MessageDeduplicator` (buffers `cp=0` snapshots for 0.8s (Feishu) ~ 5s (TG) to wait for `cp=1` complete payloads to avoid duplicate pushes and missing text).
 - `gmgn_twitter_monitor/browser.py`: Playwright browser lifecycle and page interaction helpers. Handles persistent context launch, optional first-login flow, monitor-page navigation, popup dismissal, switching to the "Mine/我的" tab, screenshot capture, and watchdog-triggered recovery reloads.
 - `gmgn_twitter_monitor/parser.py`: converts raw Socket.IO/WebSocket frames into parsed GMGN payloads and then into normalized message objects. Handles 7 actions: `tweet`, `repost`, `reply`, `quote`, `unfollow`, `delete_post`, `photo`.
 - `gmgn_twitter_monitor/models.py`: dataclasses for the normalized event schema (`StandardizedMessage`, `Author`, `Content`, `Media`, `Reference`, `AvatarChange`).
+- `gmgn_twitter_monitor/analyzer.py`: AI analysis module for specified handles. Uses DeepSeek to classify investment tracks (e.g., A-share, US stocks), extract specific stock names/codes, generate summaries, and translate texts in a single call.
 - `gmgn_twitter_monitor/distributor.py`: fan-out layer for normalized messages. Includes:
   - `LoggingDistributor` for debug logging.
   - `WebSocketDistributor` for authenticated broadcast to connected clients.
-  - `TelegramDistributor` for TG channel alerts (supports rich media via `sendPhoto`/`sendMediaGroup`, smart image grouping, multi-action formatting, and asynchronous message translation appending).
+  - `TelegramDistributor` for TG channel alerts (supports rich media via `sendPhoto`/`sendMediaGroup`, smart image grouping, multi-action formatting, original post links, and asynchronous translation/analysis appending).
   - `WebhookDistributor` for HTTP POST integrations.
   - `DistributorHub` to publish to multiple distributors simultaneously.
 - `gmgn_twitter_monitor/translator.py`: async DeepSeek translation module (low temperature, strict prompts) to translate English tweets to Chinese, skipping naturally Chinese text.
@@ -78,7 +79,7 @@ This is a Playwright-based GMGN Twitter monitor that runs a persistent Chromium 
 1. **Action Types**: GMGN has standard (`tweet`, `repost`, `reply`, `quote`) and special actions (`unfollow` uses custom `f` fields; `delete_post` uses `stw` for original action; `photo` changes avatar). The system never filters out unknown actions but maps them as best as possible.
 2. **Snapshot vs Complete Pass (`cp=0` vs `cp=1`)**: GMGN sends `cp=0` the instant a tweet launches (fast but often lacks `reference` or truncates text), followed by `cp=1` about 100ms later. We MUST deduplicate to avoid double-firing, and prefer `cp=1` to guarantee complete information.
 3. **Telegram Rate Limiting**: The `TelegramDistributor` has an internal auto-backoff handler for `429 Too Many Requests`.
-4. **Translation Strategy**: DeepSeek translation is completely strictly asynchronous. Telegram sends the original tweet immediately to get a 0-delay response, captures the `message_id`, and then schedules an asynchronous bot `editMessageText/Caption` to append the translation 1-2 seconds later. This avoids delaying the original alert and avoids triggering double mobile notifications.
+4. **Translation & Analysis Strategy**: DeepSeek translation and AI analysis are completely strictly asynchronous. Telegram sends the original tweet immediately to get a 0-delay response, captures the `message_id`, and then schedules an asynchronous bot `editMessageText/Caption` to append the translation and AI analysis (e.g., A-share track, stock code) 1-2 seconds later. This avoids delaying the original alert and avoids triggering double mobile notifications.
 5. **System Time**: Since time difference tracing is critical for high-frequency crypto trading, timestamps leverage strict millisecond comparisons + system time synced via strict `ntpdate / chrony`.
 
 ## Operational notes

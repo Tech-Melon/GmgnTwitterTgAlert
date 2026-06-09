@@ -6,10 +6,10 @@
 
 - **全动作捕获**：覆盖发推、转推、回复、引用、关注/取关、删帖、换头像、改昵称、改简介、置顶/取消置顶共 12 种推特行为
 - **FxTwitter / vxTwitter 富文本卡片**：推文自动渲染为带图/视频的嵌入式预览卡片，关注/取关等主页类动作自动渲染为用户名片
-- **DeepSeek 实时翻译**：非阻塞异步翻译，推送完成后自动追加中文译文，零延迟不卡主循环
+- **DeepSeek 实时翻译与 AI 分析**：非阻塞异步翻译，推送完成后自动追加中文译文。支持对指定博主进行投资赛道分析（如 A 股股票名称代码提取）与智能摘要
 - **多频道智能路由**：按推特 Handle 分组路由到不同 Telegram 频道，同一博主可同时推送至多个频道
 - **双轨数据捕获**：WebSocket 实时监听 + HTTP Polling 降级拦截，重连间隙零丢失
-- **去重引擎**：基于 `internal_id` 的快照/完整版智能去重，500ms 窗口内自动选优
+- **去重引擎**：基于 `internal_id` 的快照/完整版智能去重，0.8s (飞书) ~ 5s (TG) 窗口内自动选优
 - **三通道扇出分发**：Telegram、WebSocket、Webhook 并行推送，任一通道故障不影响其余
 - **12 小时自动刷新**：systemd `RuntimeMaxSec` 定时重启，防止长时间运行导致浏览器内存泄漏
 
@@ -139,6 +139,7 @@ nano .env
 | `TG_FILTER_HANDLES` | ❌ | 附加白名单（一般留空，路由分组的 Handle 会自动合并） |
 | `BINANCE_SQUARE_HANDLES` | ❌ | 币安广场等非 Twitter 账号的 ID 列表（逗号分隔），由于 FxTwitter 无法解析，会自动提取原图渲染为大图 |
 | `DEEPSEEK_API_KEY` | ❌ | DeepSeek API Key，留空则跳过翻译 |
+| `AI_ANALYZE_HANDLES`| ❌ | 启用深度 AI 分析（赛道分类、摘要、A股提取）的 Handle 列表（逗号分隔） |
 | `WEBHOOK_URL` | ❌ | Webhook 推送目标 URL，留空则禁用 |
 | `WEBHOOK_SECRET` | ❌ | HMAC-SHA256 签名密钥 |
 
@@ -288,8 +289,9 @@ sudo nginx -t && sudo systemctl reload nginx
 
 - **FxTwitter 推文卡片**：发推、转推、回复、引用等动作自动通过 `fxtwitter.com` 渲染为带图/视频的嵌入式预览
 - **vxTwitter 主页名片**：关注、取关、改昵称、改简介等动作自动通过 `vxtwitter.com` 渲染为用户头像+简介的名片卡
+- **原帖直达链接**：卡片底部统一附带 `x.com` 原帖/主页链接，支持点击直达
 - **换头像对比图**：头像变更动作保留原生 `sendMediaGroup`，展示新旧头像的并列对比
-- **DeepSeek 实时翻译**：推文发送后异步调用 DeepSeek API 翻译，翻译完成后自动编辑原消息追加中文译文，主推送流程零阻塞
+- **DeepSeek 实时翻译与深度分析**：推文发送后异步调用 DeepSeek API 翻译。对指定的博主额外进行投资赛道分析、智能摘要及 A 股个股提取，完成后自动编辑原消息追加分析与译文，主推送流程零阻塞
 - **429 退避重试**：遇到 Telegram Rate Limit 时自动等待并重试
 
 ---
