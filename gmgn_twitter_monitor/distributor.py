@@ -500,9 +500,13 @@ class TelegramDistributor(BaseDistributor):
         photo_count = sum(1 for m in all_media if m.get("type") in ("photo", "image", "thumbnail") and m.get("url"))
 
         from . import config
+        disable_preview = False
         if handle and handle.lower() in config.BINANCE_SQUARE_HANDLES:
             # 币安广场无 FxTwitter 支持，直接使用首图（即便是视频封面）
             preview_url = first_photo_url or next((m.get("url") for m in all_media if m.get("url")), None)
+            if not preview_url:
+                # 无媒体时禁用预览，防止 TG 自动抓取 x.com 链接显示误导性头像
+                disable_preview = True
         elif not has_video and photo_count == 1 and first_photo_url:
             # 单图：直链 100% 准确，避免 FxTwitter 抓图失败显示头像
             preview_url = first_photo_url
@@ -552,7 +556,7 @@ class TelegramDistributor(BaseDistributor):
                 if handle:
                     preview_url = f"https://vxtwitter.com/{handle}"
 
-        link_preview_options = {"is_disabled": False, "prefer_large_media": True}
+        link_preview_options = {"is_disabled": disable_preview, "prefer_large_media": True}
         if preview_url:
             link_preview_options["url"] = preview_url
 
