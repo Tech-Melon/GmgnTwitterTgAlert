@@ -19,11 +19,12 @@ FILE_FORMAT = "{time:YYYY-MM-DD HH:mm:ss.SSS} | {level:<8} | {message}"
 def setup_logging():
     logger.remove()
 
-    # 文件日志 — 纯文本，保留 rotation/retention
+    # 文件日志 — 纯文本，保留 rotation/retention/compression
     logger.add(
         config.LOG_FILE,
         rotation="10 MB",
         retention="7 days",
+        compression="zip",
         level="INFO",
         format=FILE_FORMAT,
         colorize=False,

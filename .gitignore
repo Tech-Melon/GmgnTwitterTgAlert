@@ -1,6 +1,10 @@
 .venv/
 __pycache__/
 *.log
+*.log.zip
+*.db
+*.db-wal
+*.db-shm
 _run_*.py
 ctl_git_release.py
 browser_data/

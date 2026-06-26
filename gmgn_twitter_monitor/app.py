@@ -27,6 +27,8 @@ from .distributor import (
 )
 from .logging_setup import setup_logging
 from .parser import build_standardized_message, extract_triggers_map, parse_socketio_payload
+from .storage import SQLiteStorage
+from .summary_scheduler import DailySummaryScheduler
 from .watchdog import Watchdog
 
 
@@ -204,7 +206,7 @@ def _cleanup_orphan_processes() -> None:
         logger.info(f"清理孤儿 {target} 进程: {'✅ 已清理' if killed else '⬜ 无残留'}")
 
 
-def _build_distributor_hub() -> DistributorHub:
+def _build_distributor_hub(storage: SQLiteStorage | None = None) -> DistributorHub:
     """根据 config 组装分发器集线器。"""
     distributors = [
         # 1. 日志分发器（始终启用）
@@ -223,6 +225,7 @@ def _build_distributor_hub() -> DistributorHub:
             enable_default=config.TG_ENABLE_DEFAULT,
             channel_map=config.TG_CHANNEL_MAP,
             filter_handles=config.TG_FILTER_HANDLES,
+            storage=storage,
         ),
         # 4. 飞书分组推送 (与 TG 分组同源并发)
         FeishuDistributor(
@@ -233,6 +236,7 @@ def _build_distributor_hub() -> DistributorHub:
             enable_default=config.FEISHU_ENABLE_DEFAULT,
             channel_map=config.FEISHU_CHANNEL_MAP,
             filter_handles=config.TG_FILTER_HANDLES,
+            storage=storage,
         ),
         # 5. Webhook HTTP POST
         WebhookDistributor(
@@ -240,7 +244,7 @@ def _build_distributor_hub() -> DistributorHub:
             secret=config.WEBHOOK_SECRET,
         ),
     ]
-    return DistributorHub(distributors)
+    return DistributorHub(distributors, storage=storage)
 
 
 async def main():
@@ -267,12 +271,16 @@ async def main():
 
     browser = BrowserManager()
     watchdog = Watchdog(config.WATCHDOG_TIMEOUT)
-    hub = _build_distributor_hub()
+    storage = SQLiteStorage(config.SUMMARY_DB_PATH)
+    hub = _build_distributor_hub(storage)
+    summary_scheduler = DailySummaryScheduler(storage, hub)
     deduplicator = MessageDeduplicator(hub.publish)
     connected_ws = set()
 
     try:
+        await storage.start()
         await hub.start_all()
+        await summary_scheduler.start()
 
         async with async_playwright() as playwright:
             page = await browser.launch(playwright)
@@ -377,6 +385,8 @@ async def main():
                     except Exception as e:
                         logger.error(f"刷新重连时发生异常: {e}")
     finally:
+        await summary_scheduler.stop()
         await hub.stop_all()
+        await storage.close()
         await browser.close()
         vdisplay.stop()

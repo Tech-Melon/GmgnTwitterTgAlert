@@ -139,12 +139,13 @@ class TelegramDistributor(BaseDistributor):
     支持按 author.handle 白名单过滤；内置 429 Rate-Limit 自动退避重试。
     """
 
-    def __init__(self, bot_token: str, default_channel_id: str, enable_default: bool = False, channel_map: dict[str, str] | None = None, filter_handles: list[str] | None = None):
+    def __init__(self, bot_token: str, default_channel_id: str, enable_default: bool = False, channel_map: dict[str, str] | None = None, filter_handles: list[str] | None = None, storage=None):
         self.bot_token = bot_token
         self.default_channel_id = default_channel_id
         self.enable_default = enable_default
         self.channel_map = channel_map or {}
         self.filter_handles = [h.lower() for h in (filter_handles or [])]
+        self.storage = storage
         self.api_base = f"https://api.telegram.org/bot{bot_token}"
         self._session: aiohttp.ClientSession | None = None
         # Future 用于解决 TG_FAST 与 TG_UPDATE 的竞态条件
@@ -438,6 +439,26 @@ class TelegramDistributor(BaseDistributor):
             logger.error(f"📱 TG 推送未知异常: {e}")
             return None
 
+    async def send_summary(self, target_channel_id: str, text: str) -> bool:
+        """发送频道定时摘要。"""
+        if not self._session or not target_channel_id or not text:
+            return False
+
+        text_to_send = text
+        if len(text_to_send) > 3900:
+            text_to_send = text_to_send[:3850] + "\n\n[摘要过长，TG 内容已截断，请查看飞书完整版]"
+
+        payload = {
+            "chat_id": target_channel_id,
+            "text": text_to_send,
+            "disable_web_page_preview": True,
+        }
+        result = await self._send_api("sendMessage", payload)
+        ok = bool(result and result.get("ok"))
+        if ok:
+            logger.info(f"🧾 TG 频道摘要推送成功 -> {target_channel_id}")
+        return ok
+
     async def _translate_and_edit(self, message_id: int, header_no_text: str, footer: str, message: dict, translated_dict: dict[str, str], target_channel_id: str, link_preview_options: dict | None = None) -> None:
         """使用预翻译结果编辑已发送的 TG 消息，替换英文正文为中文。"""
         content = message.get("content", {}) or {}
@@ -549,6 +570,21 @@ class TelegramDistributor(BaseDistributor):
                 result = await self._send_api("sendMediaGroup", payload)
                 if result and result.get("ok"):
                     logger.info(f"📱 TG 头像变更推送成功: @{handle} -> {target_channel_id} | {time_log_str}")
+                    if self.storage:
+                        try:
+                            resp_result = result.get("result")
+                            msg_id = ""
+                            if isinstance(resp_result, list) and resp_result:
+                                msg_id = resp_result[0].get("message_id", "")
+                            self.storage.record_delivery_background(
+                                message,
+                                platform="telegram",
+                                target_id=target_channel_id,
+                                target_label=target_channel_id,
+                                external_message_id=msg_id,
+                            )
+                        except Exception as e:
+                            logger.debug(f"🗄️ TG delivery 记录失败: {e}")
                 return None  # photo 动作不需要后续翻译编辑
 
         # ──── 计算时间尾部 + 帖子链接 ────
@@ -589,6 +625,18 @@ class TelegramDistributor(BaseDistributor):
                 msg_id = resp_result[0].get("message_id")
 
             if msg_id:
+                if self.storage:
+                    try:
+                        self.storage.record_delivery_background(
+                            message,
+                            platform="telegram",
+                            target_id=target_channel_id,
+                            target_label=target_channel_id,
+                            external_message_id=msg_id,
+                        )
+                    except Exception as e:
+                        logger.debug(f"🗄️ TG delivery 记录失败: {e}")
+
                 header_no_text = self._format_message(message, include_text=False)
                 return {
                     "msg_id": msg_id,
@@ -627,6 +675,54 @@ class TelegramDistributor(BaseDistributor):
         from .translator import translate_texts
         return await translate_texts(text_parts)
 
+    async def _send_filtered_track_channels(
+        self,
+        message: dict,
+        handle: str,
+        action: str,
+        h_lower: str,
+        filtered_channels: list[str],
+        handle_filter_map: dict[str, list[str]],
+        translated_dict: dict[str, str],
+        time_log_str: str,
+    ) -> None:
+        """AI category 命中赛道过滤后，补发对应 TG 频道并立即编辑为分析版。"""
+        if not filtered_channels:
+            return
+
+        category = translated_dict.get("category", "")
+        passed_filtered = []
+        for cid in filtered_channels:
+            kws = handle_filter_map.get(cid, [])
+            if not category:
+                logger.debug(f"📱 TG赛道过滤: @{h_lower} 无 AI category，跳过频道 {cid}")
+                continue
+            if not any(kw in category for kw in kws):
+                logger.debug(f"📱 TG赛道过滤: @{h_lower} category='{category}' 不含 {kws}，跳过频道 {cid}")
+                continue
+            passed_filtered.append(cid)
+
+        if not passed_filtered:
+            return
+
+        filtered_push_tasks = [
+            self._distribute_to_channel(message, handle, action, cid, time_log_str)
+            for cid in passed_filtered
+        ]
+        filtered_results = await asyncio.gather(*filtered_push_tasks, return_exceptions=True)
+
+        filtered_edit_tasks = []
+        for r in filtered_results:
+            if isinstance(r, dict) and "msg_id" in r:
+                filtered_edit_tasks.append(
+                    self._translate_and_edit(
+                        r["msg_id"], r["header_no_text"], r["footer"],
+                        message, translated_dict, r["channel_id"], r["link_preview_options"]
+                    )
+                )
+        if filtered_edit_tasks:
+            await asyncio.gather(*filtered_edit_tasks, return_exceptions=True)
+
     async def distribute(self, message: dict) -> None:
         if not self._session:
             return
@@ -638,14 +734,41 @@ class TelegramDistributor(BaseDistributor):
         target = message.get("_dispatch_target")
         internal_id = message.get("_internal_id")
 
+        # 核心：动态路由
+        h_lower = handle.lower()
+        target_channel_ids = self.channel_map.get(h_lower, [])
+        if not target_channel_ids:
+            if not self.enable_default:
+                return
+            target_channel_ids = [self.default_channel_id] if self.default_channel_id else []
+
+        if not target_channel_ids:
+            return
+
+        # ── 按赛道过滤规则拆分频道 ──
+        # normal_channels: 无过滤，走正常 TG_FAST + TG_UPDATE 流程
+        # filtered_channels: 有赛道限制，等 TG_UPDATE 拿到 AI category 后发送
+        from . import config as _cfg
+        _handle_filter_map = _cfg.TG_CHANNEL_TRACK_FILTER.get(h_lower, {})
+        normal_channels = [cid for cid in target_channel_ids if cid not in _handle_filter_map]
+        filtered_channels = [cid for cid in target_channel_ids if cid in _handle_filter_map]
+
+        tz_cst = timezone(timedelta(hours=8))
+        ts = message.get("timestamp", 0)
+        tweet_time = datetime.fromtimestamp(ts, tz=tz_cst).strftime("%Y-%m-%d %H:%M:%S") if ts else "未知"
+        push_time = datetime.now(tz=tz_cst).strftime("%Y-%m-%d %H:%M:%S")
+        time_log_str = f"| 🕐 推文时间: {tweet_time} 📡 推送时间: {push_time}"
+
         if target == "TG_UPDATE":
-            if not internal_id or internal_id not in self._msg_history:
+            push_contexts = []
+            if internal_id and internal_id in self._msg_history:
+                # await Future：等待 TG_FAST 的推送完成，拿到 msg_id
+                push_contexts = await self._msg_history[internal_id]
+            elif not filtered_channels:
                 logger.warning(f"📱 TG_UPDATE 找不到 _msg_history: {internal_id[:20] if internal_id else 'None'}")
                 return
 
-            # await Future：等待 TG_FAST 的推送完成，拿到 msg_id
-            push_contexts = await self._msg_history[internal_id]
-            if not push_contexts:
+            if not push_contexts and not filtered_channels:
                 logger.warning(f"📱 TG_UPDATE push_contexts 为空，跳过编辑")
                 return
 
@@ -653,7 +776,7 @@ class TelegramDistributor(BaseDistributor):
             translate_result = await translate_task if translate_task else None
 
             if not translate_result or isinstance(translate_result, Exception):
-                logger.warning(f"📱 TG_UPDATE 翻译结果为空或异常，跳过编辑")
+                logger.warning("📱 TG_UPDATE 翻译/分析结果为空或异常，跳过编辑与赛道过滤推送")
                 return
 
             # 使用 cp=1 完整数据重新计算预览链接（TG_FAST cp=0 可能缺少 reference）
@@ -669,24 +792,18 @@ class TelegramDistributor(BaseDistributor):
                 )
             if edit_tasks:
                 await asyncio.gather(*edit_tasks, return_exceptions=True)
+
+            await self._send_filtered_track_channels(
+                message,
+                handle,
+                action,
+                h_lower,
+                filtered_channels,
+                _handle_filter_map,
+                translate_result,
+                time_log_str,
+            )
             return
-
-        # 核心：动态路由
-        h_lower = handle.lower()
-        target_channel_ids = self.channel_map.get(h_lower, [])
-        if not target_channel_ids:
-            if not self.enable_default:
-                return
-            target_channel_ids = [self.default_channel_id] if self.default_channel_id else []
-
-        if not target_channel_ids:
-            return
-
-        tz_cst = timezone(timedelta(hours=8))
-        ts = message.get("timestamp", 0)
-        tweet_time = datetime.fromtimestamp(ts, tz=tz_cst).strftime("%Y-%m-%d %H:%M:%S") if ts else "未知"
-        push_time = datetime.now(tz=tz_cst).strftime("%Y-%m-%d %H:%M:%S")
-        time_log_str = f"| 🕐 推文时间: {tweet_time} 📡 推送时间: {push_time}"
 
         if target == "TG_FAST":
             # 立即创建 Future，让 TG_UPDATE 可以 await 等待推送完成
@@ -699,12 +816,13 @@ class TelegramDistributor(BaseDistributor):
                     if not old_future.done():
                         old_future.set_result([])
 
+            # TG_FAST 只推无过滤频道（过滤频道等 TG_UPDATE 拿到 AI category 再决定）
             push_tasks = [
                 self._distribute_to_channel(message, handle, action, cid, time_log_str)
-                for cid in target_channel_ids
+                for cid in normal_channels
             ]
             try:
-                all_results = await asyncio.gather(*push_tasks, return_exceptions=True)
+                all_results = await asyncio.gather(*push_tasks, return_exceptions=True) if push_tasks else []
                 valid_push_contexts = [r for r in all_results if isinstance(r, dict) and "msg_id" in r]
             except Exception:
                 valid_push_contexts = []
@@ -716,11 +834,11 @@ class TelegramDistributor(BaseDistributor):
                     future.set_result(valid_push_contexts)
             return
 
-        # ──── 阶段 1：推送原文 + 翻译 并发执行 ────
-        # 推送任务列表
+        # ──── 阶段 1：推送原文（normal_channels）+ 翻译 并发执行 ────
+        # 推送任务列表（normal_channels 直接推）
         push_tasks = [
             self._distribute_to_channel(message, handle, action, cid, time_log_str)
-            for cid in target_channel_ids
+            for cid in normal_channels
         ]
         # 翻译任务（只调一次 DeepSeek）
         translate_task = self._pre_translate(message)
@@ -764,6 +882,18 @@ class TelegramDistributor(BaseDistributor):
         if edit_tasks:
             await asyncio.gather(*edit_tasks, return_exceptions=True)
 
+        # ──── 阶段 3：赛道过滤频道 — 拿到 AI category 后按需发送 ────
+        await self._send_filtered_track_channels(
+            message,
+            handle,
+            action,
+            h_lower,
+            filtered_channels,
+            _handle_filter_map,
+            translated_dict,
+            time_log_str,
+        )
+
 
 # ---------------------------------------------------------------------------
 #  飞书分组推送分发器
@@ -771,7 +901,7 @@ class TelegramDistributor(BaseDistributor):
 class FeishuDistributor(BaseDistributor):
     """通过飞书自定义机器人 Webhook 推送交互式卡片消息（按组路由），附带自动大图解析。"""
 
-    def __init__(self, app_id: str, app_secret: str, default_webhook: str, default_secret: str, enable_default: bool = False, channel_map: dict[str, list[dict]] | None = None, filter_handles: list[str] | None = None):
+    def __init__(self, app_id: str, app_secret: str, default_webhook: str, default_secret: str, enable_default: bool = False, channel_map: dict[str, list[dict]] | None = None, filter_handles: list[str] | None = None, storage=None):
         self.app_id = app_id
         self.app_secret = app_secret
         self.default_webhook = default_webhook
@@ -779,6 +909,7 @@ class FeishuDistributor(BaseDistributor):
         self.enable_default = enable_default
         self.channel_map = channel_map or {}
         self.filter_handles = [h.lower() for h in (filter_handles or [])]
+        self.storage = storage
         self._session: aiohttp.ClientSession | None = None
         self._tenant_access_token: str = ""
         self._token_expire_time: float = 0
@@ -1003,7 +1134,7 @@ class FeishuDistributor(BaseDistributor):
 
         return action_text, color, "\n".join(lines)
 
-    async def _send_to_webhook(self, webhook: str, secret: str, payload: dict, handle: str, time_log_str: str) -> None:
+    async def _send_to_webhook(self, webhook: str, secret: str, payload: dict, handle: str, time_log_str: str) -> bool:
         try:
             # 注入签名
             timestamp = int(time.time())
@@ -1021,14 +1152,40 @@ class FeishuDistributor(BaseDistributor):
                         if code != 0:
                             msg = resp_data.get("msg") or resp_data.get("StatusMessage", "")
                             logger.error(f"📱 飞书推送业务失败: @{handle} [code={code}]: {msg} | webhook={webhook[-20:]}")
-                            return
+                            return False
                     except (json.JSONDecodeError, ValueError):
                         pass
                     logger.info(f"📱 飞书推送成功: @{handle} {time_log_str}")
+                    return True
                 else:
                     logger.error(f"📱 飞书推送失败: @{handle} [{resp.status}]: {body[:200]}")
+                    return False
         except Exception as e:
             logger.error(f"📱 飞书推送异常: @{handle} - {e}")
+            return False
+
+    async def send_summary(self, webhook: str, secret: str, title: str, text: str) -> bool:
+        """发送频道定时摘要到飞书。"""
+        if not self._session or not webhook or not text:
+            return False
+
+        payload = {
+            "msg_type": "interactive",
+            "card": {
+                "config": {"wide_screen_mode": True},
+                "header": {
+                    "template": "blue",
+                    "title": {"content": title[:80], "tag": "plain_text"},
+                },
+                "elements": [
+                    {"tag": "markdown", "content": text[:12000]},
+                ],
+            },
+        }
+        ok = await self._send_to_webhook(webhook, secret, dict(payload), "summary", "")
+        if ok:
+            logger.info(f"🧾 飞书频道摘要推送成功 -> webhook={webhook[-20:]}")
+        return ok
 
     async def distribute(self, message: dict) -> None:
         if not self._session:
@@ -1056,7 +1213,7 @@ class FeishuDistributor(BaseDistributor):
         push_time = datetime.now(tz=tz_cst).strftime("%Y-%m-%d %H:%M:%S")
         time_log_str = f"| 🕐 推文时间: {tweet_time} 📡 推送时间: {push_time}"
 
-        # --- 并发执行: 翻译 + 图片上传 ---
+        # --- 准备翻译/分析与媒体 ---
         content = message.get("content", {}) or {}
         reference = message.get("reference") or {}
         bio_change = message.get("bio_change") or {}
@@ -1094,26 +1251,61 @@ class FeishuDistributor(BaseDistributor):
             else:
                 from .translator import translate_texts
                 translate_task = translate_texts(text_parts)
-            
-        upload_tasks = [self._upload_image(url) for url in photo_urls]
 
-        # 阻塞等待所有并发任务完成
-        results = await asyncio.gather(*upload_tasks, translate_task if translate_task else asyncio.sleep(0), return_exceptions=True)
+        has_track_filter = any(conf.get("track_filter") for conf in target_configs)
 
-        # 解析翻译结果
         translated_dict = {}
-        if translate_task:
-            t_res = results[-1]
-            if isinstance(t_res, Exception):
-                logger.error(f"🌐 飞书翻译失败: {t_res}")
-            elif t_res:
-                translated_dict = t_res
-
-        # 解析上传图片的 image_key
         img_keys = []
-        for res in (results[:-1] if translate_task else results):
-            if isinstance(res, str) and res:
-                img_keys.append(res)
+
+        if has_track_filter:
+            # 先拿到 AI category 并筛目标，避免不命中赛道时仍上传图片。
+            if translate_task:
+                t_res = await asyncio.gather(translate_task, return_exceptions=True)
+                t_res = t_res[0]
+                if isinstance(t_res, Exception):
+                    logger.error(f"🌐 飞书翻译失败: {t_res}")
+                elif t_res:
+                    translated_dict = t_res
+
+            filtered_configs = []
+            for conf in target_configs:
+                track_filter = conf.get("track_filter")
+                if track_filter:
+                    category = translated_dict.get("category", "")
+                    if not category:
+                        logger.debug(f"📱 赛道过滤: @{handle} 无 AI category，跳过 webhook={conf['webhook'][-20:]}")
+                        continue
+                    if not any(kw in category for kw in track_filter):
+                        logger.debug(f"📱 赛道过滤: @{handle} category='{category}' 不含 {track_filter}，跳过")
+                        continue
+                filtered_configs.append(conf)
+
+            target_configs = filtered_configs
+            if not target_configs:
+                return
+
+            upload_tasks = [self._upload_image(url) for url in photo_urls]
+            upload_results = await asyncio.gather(*upload_tasks, return_exceptions=True) if upload_tasks else []
+            for res in upload_results:
+                if isinstance(res, str) and res:
+                    img_keys.append(res)
+        else:
+            # 无赛道过滤时维持原有低延迟策略：翻译和图片上传并发。
+            upload_tasks = [self._upload_image(url) for url in photo_urls]
+            results = await asyncio.gather(
+                *upload_tasks, translate_task if translate_task else asyncio.sleep(0), return_exceptions=True
+            )
+
+            if translate_task:
+                t_res = results[-1]
+                if isinstance(t_res, Exception):
+                    logger.error(f"🌐 飞书翻译失败: {t_res}")
+                elif t_res:
+                    translated_dict = t_res
+
+            for res in (results[:-1] if translate_task else results):
+                if isinstance(res, str) and res:
+                    img_keys.append(res)
 
         # --- 组装 Markdown 和卡片 ---
         title, color, markdown_text = self._format_markdown(message, translated_dict, has_video=has_video)
@@ -1125,12 +1317,23 @@ class FeishuDistributor(BaseDistributor):
             }
         ]
 
-        # 将成功上传的图片直接内嵌到卡片中
-        for key in img_keys:
+        # 将成功上传的图片内嵌到卡片中（多图使用 img_combination 并列排布）
+        if len(img_keys) == 1:
+            # 单图保持原样，全宽展示
             elements.append({
                 "tag": "img",
-                "img_key": key,
+                "img_key": img_keys[0],
                 "alt": {"tag": "plain_text", "content": "Twitter Image"}
+            })
+        elif len(img_keys) >= 2:
+            # 多图使用 img_combination 多图混排组件
+            mode_map = {2: "double", 3: "triple", 4: "bisect"}
+            mode = mode_map.get(len(img_keys), "bisect")
+            elements.append({
+                "tag": "img_combination",
+                "combination_mode": mode,
+                "corner_radius": "8px",
+                "img_list": [{"img_key": key} for key in img_keys[:4]]
             })
 
         payload = {
@@ -1148,12 +1351,26 @@ class FeishuDistributor(BaseDistributor):
             }
         }
         
-        tasks = []
-        for conf in target_configs:
-            tasks.append(self._send_to_webhook(conf["webhook"], conf["secret"], payload, handle, time_log_str))
-        
+        tasks = [
+            self._send_to_webhook(conf["webhook"], conf["secret"], dict(payload), handle, time_log_str)
+            for conf in target_configs
+        ]
+
         if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            if self.storage:
+                for conf, result in zip(target_configs, results):
+                    if result is True:
+                        try:
+                            target_id = self.storage.anonymize_target(conf["webhook"])
+                            self.storage.record_delivery_background(
+                                message,
+                                platform="feishu",
+                                target_id=target_id,
+                                target_label=conf["webhook"][-20:],
+                            )
+                        except Exception as e:
+                            logger.debug(f"🗄️ 飞书 delivery 记录失败: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -1216,8 +1433,9 @@ class WebhookDistributor(BaseDistributor):
 class DistributorHub:
     """管理所有分发器的生命周期与消息扇出。"""
 
-    def __init__(self, distributors: list[BaseDistributor] | None = None):
+    def __init__(self, distributors: list[BaseDistributor] | None = None, storage=None):
         self.distributors = distributors or []
+        self.storage = storage
         self._shared_translation_tasks = {}
 
     async def start_all(self) -> None:
@@ -1244,6 +1462,12 @@ class DistributorHub:
         这样推送原文不会被分析阻塞，保持“先发后改”的低延迟策略。
         """
         target = message.get("_dispatch_target", "DEFAULT")
+
+        if self.storage:
+            try:
+                self.storage.record_message_background(message)
+            except Exception as e:
+                logger.debug(f"🗄️ message 记录失败: {e}")
 
         # ──── 创建共享分析 Task（不 await，与推送原文并发） ────
         from . import config as cfg

@@ -137,10 +137,18 @@ nano .env
 | `TG_ENABLE_<GROUP>` | ❌ | 分组推送开关，如 `TG_ENABLE_BINANCE=True` |
 | `TG_CHANNEL_ID_<GROUP>` | ❌ | 分组目标频道 ID，如 `TG_CHANNEL_ID_BINANCE=-100xxx` |
 | `TG_ROUTING_<GROUP>` | ❌ | 分组内的推特 Handle 列表（逗号分隔），如 `TG_ROUTING_BINANCE=cz_binance` |
+| `TG_TRACK_FILTER_<GROUP>` | ❌ | TG 分组赛道过滤关键词（逗号分隔），如 `A股`；配置后仅推送 AI 赛道命中的内容 |
+| `FEISHU_TRACK_FILTER_<GROUP>` | ❌ | 飞书分组赛道过滤关键词（逗号分隔），如 `A股`；配置后仅推送 AI 赛道命中的内容 |
 | `TG_FILTER_HANDLES` | ❌ | 附加白名单（一般留空，路由分组的 Handle 会自动合并） |
 | `BINANCE_SQUARE_HANDLES` | ❌ | 币安广场等非 Twitter 账号的 ID 列表（逗号分隔），由于 FxTwitter 无法解析，会自动提取原图渲染为大图 |
 | `DEEPSEEK_API_KEY` | ❌ | DeepSeek API Key，留空则跳过翻译 |
 | `AI_ANALYZE_HANDLES`| ❌ | 启用深度 AI 分析（赛道分类、摘要、A股提取）的 Handle 列表（逗号分隔） |
+| `SUMMARY_ENABLE` | ❌ | 定时频道总结开关（`True`/`False`），默认 `False` |
+| `SUMMARY_TIMES` | ❌ | 每日总结时间，逗号分隔，如 `07:30,20:00` |
+| `SUMMARY_GROUPS` | ❌ | 要总结的路由分组后缀，如 `BINANCE`；默认读取该组 TG 频道作为数据源 |
+| `SUMMARY_DB_PATH` | ❌ | SQLite 数据库路径，默认 `twitter_monitor.db` |
+| `SUMMARY_AI_TIMEOUT_SECONDS` | ❌ | 频道总结 AI 请求超时时间，默认 `180` 秒 |
+| `SUMMARY_TWEET_TEXT_LIMIT` | ❌ | 每条推文喂给总结 AI 的正文+关联原文总长度限制，默认 `500` 字 |
 | `WEBHOOK_URL` | ❌ | Webhook 推送目标 URL，留空则禁用 |
 | `WEBHOOK_SECRET` | ❌ | HMAC-SHA256 签名密钥 |
 
@@ -153,15 +161,39 @@ nano .env
 TG_ENABLE_BINANCE=True                              # 开关
 TG_CHANNEL_ID_BINANCE=-1001234567891                 # 目标频道
 TG_ROUTING_BINANCE=cz_binance,heyibinance            # 博主列表
+TG_TRACK_FILTER_BINANCE=                             # 可选：如 A股
 
 # 飞书群聊配置 (支持原生提取大图渲染)
 FEISHU_ENABLE_BINANCE=True                           # 飞书开关
 FEISHU_WEBHOOK_BINANCE=https://open.feishu.cn/...    # 飞书群自定义机器人 Webhook
 FEISHU_SECRET_BINANCE=your-secret                    # 飞书安全签名密钥
+FEISHU_TRACK_FILTER_BINANCE=                         # 可选：如 A股
 ```
 
 - 同一个 Handle 可以出现在多个分组中，会同时推送到所有匹配的频道
 - `TG_FILTER_HANDLES` 无需手动填写路由分组里的 Handle，系统会自动合并
+- 赛道过滤依赖 `AI_ANALYZE_HANDLES` 产出 `category`；如果某个分组配置了 `TG_TRACK_FILTER_<GROUP>` 或 `FEISHU_TRACK_FILTER_<GROUP>`，请把该分组的 Handle 加入 `AI_ANALYZE_HANDLES`
+
+#### 定时频道总结
+
+系统会将标准化推文和成功投递记录保存到 SQLite，用于后续按频道生成摘要。以下配置会每天 07:30 和 20:00 总结 `BINANCE` 组的 TG 频道内容，并将同一份 AI 摘要推送到该组 TG 与飞书：
+
+```env
+SUMMARY_ENABLE=True
+SUMMARY_TIMEZONE=Asia/Shanghai
+SUMMARY_TIMES=07:30,20:00
+SUMMARY_GROUPS=BINANCE
+SUMMARY_LABEL_BINANCE=Binance
+SUMMARY_AI_TIMEOUT_SECONDS=180
+SUMMARY_TWEET_TEXT_LIMIT=500
+```
+
+默认规则：
+- 数据源：`TG_CHANNEL_ID_<GROUP>`，例如 `TG_CHANNEL_ID_BINANCE`
+- TG 目标：同一个 `TG_CHANNEL_ID_<GROUP>`
+- 飞书目标：同组 `FEISHU_WEBHOOK_<GROUP>` / `FEISHU_SECRET_<GROUP>`
+- 时间窗口：07:30 总结前一晚 20:00 到当天 07:30；20:00 总结当天 07:30 到 20:00
+- AI 输入：每条记录包含推文正文；如果是回复、引用、转推、删帖等动作，也会携带关联原文、关联作者和关联链接
 
 #### 非推特账号特殊处理 (如币安广场)
 
