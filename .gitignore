@@ -10,9 +10,13 @@ ctl_git_release.py
 browser_data/
 monitor_running.png
 .env
+.env*
+!.env.example
 
 # IDE & OS
 .vscode/
 .idea/
 .DS_Store
 *.swp
+docs/instagram_signal_format.md
+docs/instagram_story_api_guide.md

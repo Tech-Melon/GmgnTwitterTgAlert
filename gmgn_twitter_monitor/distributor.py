@@ -2,8 +2,10 @@ import asyncio
 import base64
 import hashlib
 import hmac
+import html
 import json
 import os
+import re
 import time
 from datetime import datetime, timezone, timedelta
 from typing import Set
@@ -13,6 +15,12 @@ import websockets
 from loguru import logger
 from websockets.server import WebSocketServerProtocol
 
+
+TEXT_ENRICHMENT_ACTIONS = {"tweet", "reply", "quote", "repost"}
+
+
+def _should_run_text_enrichment(message: dict) -> bool:
+    return message.get("action") in TEXT_ENRICHMENT_ACTIONS
 
 
 class BaseDistributor:
@@ -150,6 +158,7 @@ class TelegramDistributor(BaseDistributor):
         self._session: aiohttp.ClientSession | None = None
         # Future 用于解决 TG_FAST 与 TG_UPDATE 的竞态条件
         self._msg_history: dict[str, asyncio.Future] = {}
+        self._filtered_sent_keys: dict[tuple[str, str], None] = {}
 
     async def start(self):
         if not self.bot_token or (not self.default_channel_id and not self.channel_map):
@@ -170,6 +179,11 @@ class TelegramDistributor(BaseDistributor):
             return True
         handle = message.get("author", {}).get("handle", "")
         return handle.lower() in self.filter_handles
+
+    @staticmethod
+    def _track_matches(category: str, keywords: list[str]) -> bool:
+        normalized_category = "".join((category or "").casefold().split())
+        return any("".join(kw.casefold().split()) in normalized_category for kw in keywords if kw)
 
     @staticmethod
     def _escape_html(text: str) -> str:
@@ -221,7 +235,7 @@ class TelegramDistributor(BaseDistributor):
             t_handle = message.get("unfollow_target", {}).get("handle")
             if t_handle:
                 return f"https://x.com/{t_handle}"
-        elif action in ("photo", "description", "name"):
+        elif action in ("photo", "description", "name", "banner"):
             if handle:
                 return f"https://x.com/{handle}"
         return ""
@@ -251,7 +265,10 @@ class TelegramDistributor(BaseDistributor):
         disable_preview = False
 
         from . import config
-        if handle and handle.lower() in config.BINANCE_SQUARE_HANDLES:
+        if action == "banner":
+            banner_change = message.get("banner_change") or {}
+            preview_url = banner_change.get("after") or banner_change.get("before")
+        elif handle and handle.lower() in config.BINANCE_SQUARE_HANDLES:
             preview_url = first_photo_url or next(
                 (m.get("url") for m in all_media if m.get("url")), None
             )
@@ -323,6 +340,7 @@ class TelegramDistributor(BaseDistributor):
             "unfollow": "❌ 取消关注",
             "delete_post": "🗑️ 删除推文",
             "photo": "🖼️ 更换头像",
+            "banner": "🖼️ 更换横幅",
             "description": "⇧ 简介更新",
             "name": "📛 更改昵称",
             "pin": "📌 置顶推文",
@@ -386,6 +404,16 @@ class TelegramDistributor(BaseDistributor):
                 lines.append(self._escape_html(bio_change.get("before", "")))
                 lines.append("\n<b>新简介:</b>")
                 lines.append(self._escape_html(bio_change.get("after", "")))
+        elif action == "banner":
+            banner_change = msg.get("banner_change")
+            if banner_change:
+                before = banner_change.get("before", "")
+                after = banner_change.get("after", "")
+                lines.append("")
+                if before:
+                    lines.append(f'🅰️ <a href="{before}">旧横幅</a>')
+                if after:
+                    lines.append(f'🅱️ <a href="{after}">新横幅</a>')
         else:
             if include_text:
                 content = msg.get("content") or {}
@@ -451,13 +479,30 @@ class TelegramDistributor(BaseDistributor):
         payload = {
             "chat_id": target_channel_id,
             "text": text_to_send,
+            "parse_mode": "HTML",
             "disable_web_page_preview": True,
         }
         result = await self._send_api("sendMessage", payload)
         ok = bool(result and result.get("ok"))
         if ok:
             logger.info(f"🧾 TG 频道摘要推送成功 -> {target_channel_id}")
+            message_id = (result.get("result") or {}).get("message_id")
+            if message_id:
+                await self._pin_summary(target_channel_id, message_id)
         return ok
+
+    async def _pin_summary(self, target_channel_id: str, message_id: int) -> None:
+        """置顶最新频道摘要；权限不足时不影响摘要发送结果。"""
+        payload = {
+            "chat_id": target_channel_id,
+            "message_id": message_id,
+            "disable_notification": True,
+        }
+        result = await self._send_api("pinChatMessage", payload)
+        if result and result.get("ok"):
+            logger.info(f"📌 TG 频道摘要已置顶 -> {target_channel_id} #{message_id}")
+        else:
+            logger.warning(f"📌 TG 频道摘要置顶失败 -> {target_channel_id} #{message_id}")
 
     async def _translate_and_edit(self, message_id: int, header_no_text: str, footer: str, message: dict, translated_dict: dict[str, str], target_channel_id: str, link_preview_options: dict | None = None) -> None:
         """使用预翻译结果编辑已发送的 TG 消息，替换英文正文为中文。"""
@@ -465,12 +510,13 @@ class TelegramDistributor(BaseDistributor):
         reference = message.get("reference") or {}
         bio_change = message.get("bio_change") or {}
         text_parts = {}
-        if content.get("text"):
-            text_parts["content"] = content["text"]
-        if reference.get("text"):
-            text_parts["reference"] = reference["text"]
-        if bio_change.get("after"):
-            text_parts["bio"] = bio_change["after"]
+        if _should_run_text_enrichment(message):
+            if content.get("text"):
+                text_parts["content"] = content["text"]
+            if reference.get("text"):
+                text_parts["reference"] = reference["text"]
+            if bio_change.get("after"):
+                text_parts["bio"] = bio_change["after"]
 
         # 获取翻译后的文本（如果返回 dict 中缺失，则 fallback 到原文）
         main_text = translated_dict.get("content") or text_parts.get("content", "")
@@ -551,41 +597,63 @@ class TelegramDistributor(BaseDistributor):
         else:
             logger.warning(f"🌐 TG 翻译追加失败: @{handle} -> {target_channel_id}")
 
+    async def _send_media_change_group(
+        self,
+        message: dict,
+        handle: str,
+        target_channel_id: str,
+        time_log_str: str,
+        change_key: str,
+        success_label: str,
+    ) -> bool:
+        change = message.get(change_key) or {}
+        before_url = change.get("before", "")
+        after_url = change.get("after", "")
+        if not before_url or not after_url:
+            return False
+
+        caption = self._format_message(message)[:1024]
+        media = json.dumps([
+            {"type": "photo", "media": before_url, "caption": caption, "parse_mode": "HTML"},
+            {"type": "photo", "media": after_url},
+        ])
+        payload = {"chat_id": target_channel_id, "media": media}
+        result = await self._send_api("sendMediaGroup", payload)
+        if result and result.get("ok"):
+            logger.info(f"📱 TG {success_label}推送成功: @{handle} -> {target_channel_id} | {time_log_str}")
+            if self.storage:
+                try:
+                    resp_result = result.get("result")
+                    msg_id = ""
+                    if isinstance(resp_result, list) and resp_result:
+                        msg_id = resp_result[0].get("message_id", "")
+                    self.storage.record_delivery_background(
+                        message,
+                        platform="telegram",
+                        target_id=target_channel_id,
+                        target_label=target_channel_id,
+                        external_message_id=msg_id,
+                    )
+                except Exception as e:
+                    logger.debug(f"🗄️ TG delivery 记录失败: {e}")
+            return True
+        return False
+
     async def _distribute_to_channel(self, message: dict, handle: str, action: str, target_channel_id: str, time_log_str: str) -> dict | None:
         """推送原文到单个频道，返回推送上下文（含 msg_id）供后续翻译编辑使用。"""
         # ──── photo 动作：由于 FxTwitter 无法展示换头像前后的两张图，需要保留 sendMediaGroup ────
         if action == "photo":
-            avatar_change = message.get("avatar_change") or {}
-            before_url = avatar_change.get("before", "")
-            after_url = avatar_change.get("after", "")
-
-            if before_url and after_url:
-                caption = self._format_message(message)[:1024]
-                import json
-                media = json.dumps([
-                    {"type": "photo", "media": before_url, "caption": caption, "parse_mode": "HTML"},
-                    {"type": "photo", "media": after_url},
-                ])
-                payload = {"chat_id": target_channel_id, "media": media}
-                result = await self._send_api("sendMediaGroup", payload)
-                if result and result.get("ok"):
-                    logger.info(f"📱 TG 头像变更推送成功: @{handle} -> {target_channel_id} | {time_log_str}")
-                    if self.storage:
-                        try:
-                            resp_result = result.get("result")
-                            msg_id = ""
-                            if isinstance(resp_result, list) and resp_result:
-                                msg_id = resp_result[0].get("message_id", "")
-                            self.storage.record_delivery_background(
-                                message,
-                                platform="telegram",
-                                target_id=target_channel_id,
-                                target_label=target_channel_id,
-                                external_message_id=msg_id,
-                            )
-                        except Exception as e:
-                            logger.debug(f"🗄️ TG delivery 记录失败: {e}")
+            if await self._send_media_change_group(
+                message, handle, target_channel_id, time_log_str, "avatar_change", "头像变更"
+            ):
                 return None  # photo 动作不需要后续翻译编辑
+
+        # ──── banner 动作：展示横幅前后对比图 ────
+        if action == "banner":
+            if await self._send_media_change_group(
+                message, handle, target_channel_id, time_log_str, "banner_change", "横幅变更"
+            ):
+                return None  # banner 动作不需要后续翻译编辑
 
         # ──── 计算时间尾部 + 帖子链接 ────
         tz_cst = timezone(timedelta(hours=8))
@@ -653,6 +721,9 @@ class TelegramDistributor(BaseDistributor):
         优先 await Hub 层创建的共享分析 Task（与推送原文并发，不阻塞）；
         若无 Task 则走原 translator 纯翻译链路。
         """
+        if not _should_run_text_enrichment(message):
+            return None
+
         # 优先 await Hub 层创建的共享分析 Task
         analysis_task = message.get("_ai_analysis_task")
         if analysis_task is not None:
@@ -662,12 +733,13 @@ class TelegramDistributor(BaseDistributor):
         reference = message.get("reference") or {}
         bio_change = message.get("bio_change") or {}
         text_parts = {}
-        if content.get("text"):
-            text_parts["content"] = content["text"]
-        if reference.get("text"):
-            text_parts["reference"] = reference["text"]
-        if bio_change.get("after"):
-            text_parts["bio"] = bio_change["after"]
+        if _should_run_text_enrichment(message):
+            if content.get("text"):
+                text_parts["content"] = content["text"]
+            if reference.get("text"):
+                text_parts["reference"] = reference["text"]
+            if bio_change.get("after"):
+                text_parts["bio"] = bio_change["after"]
 
         if not text_parts:
             return None
@@ -694,12 +766,18 @@ class TelegramDistributor(BaseDistributor):
         passed_filtered = []
         for cid in filtered_channels:
             kws = handle_filter_map.get(cid, [])
+            sent_key = (message.get("_internal_id") or message.get("tweet_id") or "", cid)
+            if sent_key[0] and sent_key in self._filtered_sent_keys:
+                logger.debug(f"📱 TG赛道过滤: @{h_lower} 已推送过频道 {cid}，跳过重复补发")
+                continue
             if not category:
                 logger.debug(f"📱 TG赛道过滤: @{h_lower} 无 AI category，跳过频道 {cid}")
                 continue
-            if not any(kw in category for kw in kws):
+            if not self._track_matches(category, kws):
                 logger.debug(f"📱 TG赛道过滤: @{h_lower} category='{category}' 不含 {kws}，跳过频道 {cid}")
                 continue
+            if sent_key[0]:
+                self._filtered_sent_keys[sent_key] = None
             passed_filtered.append(cid)
 
         if not passed_filtered:
@@ -712,7 +790,8 @@ class TelegramDistributor(BaseDistributor):
         filtered_results = await asyncio.gather(*filtered_push_tasks, return_exceptions=True)
 
         filtered_edit_tasks = []
-        for r in filtered_results:
+        for cid, r in zip(passed_filtered, filtered_results):
+            sent_key = (message.get("_internal_id") or message.get("tweet_id") or "", cid)
             if isinstance(r, dict) and "msg_id" in r:
                 filtered_edit_tasks.append(
                     self._translate_and_edit(
@@ -720,6 +799,16 @@ class TelegramDistributor(BaseDistributor):
                         message, translated_dict, r["channel_id"], r["link_preview_options"]
                     )
                 )
+            elif isinstance(r, Exception):
+                if sent_key[0]:
+                    self._filtered_sent_keys.pop(sent_key, None)
+                logger.warning(f"📱 TG赛道过滤推送异常: @{h_lower} -> {cid}: {r}")
+            else:
+                if sent_key[0]:
+                    self._filtered_sent_keys.pop(sent_key, None)
+
+        if len(self._filtered_sent_keys) > 2000:
+            self._filtered_sent_keys = dict(list(self._filtered_sent_keys.items())[-1000:])
         if filtered_edit_tasks:
             await asyncio.gather(*filtered_edit_tasks, return_exceptions=True)
 
@@ -760,16 +849,20 @@ class TelegramDistributor(BaseDistributor):
         time_log_str = f"| 🕐 推文时间: {tweet_time} 📡 推送时间: {push_time}"
 
         if target == "TG_UPDATE":
-            push_contexts = []
-            if internal_id and internal_id in self._msg_history:
-                # await Future：等待 TG_FAST 的推送完成，拿到 msg_id
-                push_contexts = await self._msg_history[internal_id]
-            elif not filtered_channels:
-                logger.warning(f"📱 TG_UPDATE 找不到 _msg_history: {internal_id[:20] if internal_id else 'None'}")
+            if not _should_run_text_enrichment(message):
+                logger.debug(f"📱 TG_UPDATE 跳过非正文动作: {action}")
                 return
 
-            if not push_contexts and not filtered_channels:
-                logger.warning(f"📱 TG_UPDATE push_contexts 为空，跳过编辑")
+            push_contexts = []
+            history_future = None
+            if internal_id and internal_id in self._msg_history:
+                history = self._msg_history[internal_id]
+                if isinstance(history, asyncio.Future):
+                    history_future = history
+                else:
+                    push_contexts = history
+            elif not filtered_channels:
+                logger.warning(f"📱 TG_UPDATE 找不到 _msg_history: {internal_id[:20] if internal_id else 'None'}")
                 return
 
             translate_task = self._pre_translate(message)
@@ -777,6 +870,31 @@ class TelegramDistributor(BaseDistributor):
 
             if not translate_result or isinstance(translate_result, Exception):
                 logger.warning("📱 TG_UPDATE 翻译/分析结果为空或异常，跳过编辑与赛道过滤推送")
+                return
+
+            # 过滤频道不依赖 TG_FAST 的普通频道发送结果。先补发过滤频道，
+            # 避免普通频道发送慢、失败或 history 竞态拖住 A股 TG。
+            await self._send_filtered_track_channels(
+                message,
+                handle,
+                action,
+                h_lower,
+                filtered_channels,
+                _handle_filter_map,
+                translate_result,
+                time_log_str,
+            )
+
+            if history_future is not None:
+                try:
+                    push_contexts = await asyncio.wait_for(asyncio.shield(history_future), timeout=20)
+                except asyncio.TimeoutError:
+                    logger.warning(f"📱 TG_UPDATE 等待普通频道推送结果超时，跳过编辑: {internal_id[:20] if internal_id else 'None'}")
+                    push_contexts = []
+
+            if not push_contexts:
+                if not filtered_channels:
+                    logger.warning("📱 TG_UPDATE push_contexts 为空，跳过编辑")
                 return
 
             # 使用 cp=1 完整数据重新计算预览链接（TG_FAST cp=0 可能缺少 reference）
@@ -792,17 +910,6 @@ class TelegramDistributor(BaseDistributor):
                 )
             if edit_tasks:
                 await asyncio.gather(*edit_tasks, return_exceptions=True)
-
-            await self._send_filtered_track_channels(
-                message,
-                handle,
-                action,
-                h_lower,
-                filtered_channels,
-                _handle_filter_map,
-                translate_result,
-                time_log_str,
-            )
             return
 
         if target == "TG_FAST":
@@ -1020,6 +1127,7 @@ class FeishuDistributor(BaseDistributor):
             "unfollow": ("❌ 取消关注", "red"),
             "delete_post": ("🗑️ 删除推文", "red"),
             "photo": ("🖼️ 更换头像", "yellow"),
+            "banner": ("🖼️ 更换横幅", "yellow"),
             "description": ("⇧ 简介更新", "yellow"),
             "name": ("📛 更改昵称", "yellow"),
             "pin": ("📌 置顶推文", "blue"),
@@ -1125,7 +1233,7 @@ class FeishuDistributor(BaseDistributor):
             t_h = (msg.get("unfollow_target") or {}).get("handle")
             if t_h:
                 tweet_url = f"https://x.com/{t_h}"
-        elif action in ("photo", "description", "name"):
+        elif action in ("photo", "description", "name", "banner"):
             tweet_url = f"https://x.com/{handle}"
         
         if tweet_url:
@@ -1169,6 +1277,8 @@ class FeishuDistributor(BaseDistributor):
         if not self._session or not webhook or not text:
             return False
 
+        content = self._telegram_html_to_markdown(text)
+
         payload = {
             "msg_type": "interactive",
             "card": {
@@ -1178,7 +1288,7 @@ class FeishuDistributor(BaseDistributor):
                     "title": {"content": title[:80], "tag": "plain_text"},
                 },
                 "elements": [
-                    {"tag": "markdown", "content": text[:12000]},
+                    {"tag": "markdown", "content": content[:12000]},
                 ],
             },
         }
@@ -1186,6 +1296,16 @@ class FeishuDistributor(BaseDistributor):
         if ok:
             logger.info(f"🧾 飞书频道摘要推送成功 -> webhook={webhook[-20:]}")
         return ok
+
+    @staticmethod
+    def _telegram_html_to_markdown(text: str) -> str:
+        """将 TG 摘要 HTML 粗略转为飞书 Markdown，避免卡片显示标签。"""
+        text = re.sub(r'<a href="([^"]+)">(.+?)</a>', r'[\2](\1)', text, flags=re.S)
+        text = re.sub(r"</?blockquote(?: expandable)?>", "", text)
+        text = re.sub(r"</?b>", "**", text)
+        text = re.sub(r"</?i>", "*", text)
+        text = re.sub(r"<[^>]+>", "", text)
+        return html.unescape(text).strip()
 
     async def distribute(self, message: dict) -> None:
         if not self._session:
@@ -1218,12 +1338,13 @@ class FeishuDistributor(BaseDistributor):
         reference = message.get("reference") or {}
         bio_change = message.get("bio_change") or {}
         text_parts = {}
-        if content.get("text"):
-            text_parts["content"] = content["text"]
-        if reference.get("text"):
-            text_parts["reference"] = reference["text"]
-        if bio_change.get("after"):
-            text_parts["bio"] = bio_change["after"]
+        if _should_run_text_enrichment(message):
+            if content.get("text"):
+                text_parts["content"] = content["text"]
+            if reference.get("text"):
+                text_parts["reference"] = reference["text"]
+            if bio_change.get("after"):
+                text_parts["bio"] = bio_change["after"]
 
         # 解析图片与视频封面
         content_media = content.get("media") or []
@@ -1275,7 +1396,7 @@ class FeishuDistributor(BaseDistributor):
                     if not category:
                         logger.debug(f"📱 赛道过滤: @{handle} 无 AI category，跳过 webhook={conf['webhook'][-20:]}")
                         continue
-                    if not any(kw in category for kw in track_filter):
+                    if not TelegramDistributor._track_matches(category, track_filter):
                         logger.debug(f"📱 赛道过滤: @{handle} category='{category}' 不含 {track_filter}，跳过")
                         continue
                 filtered_configs.append(conf)
@@ -1472,7 +1593,11 @@ class DistributorHub:
         # ──── 创建共享分析 Task（不 await，与推送原文并发） ────
         from . import config as cfg
         handle = message.get("author", {}).get("handle", "").lower()
-        if handle in cfg.AI_ANALYZE_HANDLES and target != "TG_FAST":
+        if (
+            handle in cfg.AI_ANALYZE_HANDLES
+            and target != "TG_FAST"
+            and _should_run_text_enrichment(message)
+        ):
             content = message.get("content", {}) or {}
             reference = message.get("reference") or {}
             bio_change = message.get("bio_change") or {}

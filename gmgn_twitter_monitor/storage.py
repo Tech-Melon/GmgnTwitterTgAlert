@@ -367,6 +367,7 @@ class SQLiteStorage:
             "reference",
             "bio_change",
             "avatar_change",
+            "banner_change",
             "unfollow_target",
             "original_action",
         )
@@ -491,6 +492,6 @@ class SQLiteStorage:
                 return f"https://x.com/{ref_handle}/status/{ref_tweet_id}"
             if tweet_id and handle:
                 return f"https://x.com/{handle}/status/{tweet_id}"
-        if action in ("photo", "description", "name") and handle:
+        if action in ("photo", "description", "name", "banner") and handle:
             return f"https://x.com/{handle}"
         return ""

@@ -1,7 +1,7 @@
 import json
 from typing import Any
 
-from .models import Author, AvatarChange, BioChange, Content, Media, Reference, StandardizedMessage, UnfollowTarget
+from .models import Author, AvatarChange, BannerChange, BioChange, Content, Media, Reference, StandardizedMessage, UnfollowTarget
 
 
 def parse_socketio_payload(frame_data: Any) -> dict | None:
@@ -34,13 +34,26 @@ def parse_socketio_payload(frame_data: Any) -> dict | None:
     return parsed
 
 
+def _normalize_action_type(item: dict) -> str:
+    action_type = item.get("tw", "unknown")
+    if action_type != "other":
+        return action_type
+
+    p_data = item.get("p")
+    if isinstance(p_data, dict):
+        banner_keys = {"bb", "ab", "b", "banner", "before_banner", "after_banner", "old_banner"}
+        if any(key in p_data for key in banner_keys):
+            return "banner"
+    return action_type
+
+
 def extract_triggers_map(items: list[dict]) -> dict[str, str]:
     triggers_map = {}
     for tweet_data in items:
         if not tweet_data:
             continue
 
-        action_type = tweet_data.get("tw", "unknown")
+        action_type = _normalize_action_type(tweet_data)
         u_data = tweet_data.get("u")
         if u_data and isinstance(u_data, dict):
             user_handle = u_data.get("s")
@@ -99,6 +112,7 @@ def _build_unfollow_target(item: dict) -> UnfollowTarget | None:
         name=target.get("n"),
         bio=target.get("d"),
         avatar=target.get("a"),
+        banner=target.get("b"),
         followers=target.get("f"),
     )
 
@@ -127,8 +141,20 @@ def _build_bio_change(item: dict) -> BioChange | None:
     )
 
 
+def _build_banner_change(item: dict) -> BannerChange | None:
+    """从 p 字段构建横幅变更信息（仅 banner 动作）。"""
+    p_data = item.get("p")
+    if not p_data or not isinstance(p_data, dict):
+        return None
+
+    return BannerChange(
+        before=p_data.get("bb") or p_data.get("before_banner") or p_data.get("old_banner"),
+        after=p_data.get("ab") or p_data.get("b") or p_data.get("banner") or p_data.get("after_banner"),
+    )
+
+
 def build_standardized_message(item: dict) -> StandardizedMessage:
-    action_type = item.get("tw", "unknown")
+    action_type = _normalize_action_type(item)
 
     # 用户信息
     u = item.get("u", {}) or {}
@@ -162,6 +188,9 @@ def build_standardized_message(item: dict) -> StandardizedMessage:
     # 简介变更（仅 description）
     bio_change = _build_bio_change(item) if action_type == "description" else None
 
+    # 横幅变更（仅 banner）
+    banner_change = _build_banner_change(item) if action_type == "banner" else None
+
     # 时间戳：gmgn 给的是毫秒级，标准化为秒级
     raw_ts = item.get("ts", 0)
     try:
@@ -182,4 +211,5 @@ def build_standardized_message(item: dict) -> StandardizedMessage:
         unfollow_target=unfollow_target,
         avatar_change=avatar_change,
         bio_change=bio_change,
+        banner_change=banner_change,
     )

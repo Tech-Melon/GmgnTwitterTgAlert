@@ -10,13 +10,16 @@
 """
 
 import os
+import shutil
 import subprocess
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
 SERVICE_NAME = "gmgn-twitter-monitor.service"
-APP_LOG_FILE = Path(__file__).resolve().parent / "twitter_monitor.log"
+BASE_DIR = Path(__file__).resolve().parent
+APP_LOG_FILE = BASE_DIR / "twitter_monitor.log"
+ENV_FILE = BASE_DIR / ".env"
 
 # ──────────────────────────── 颜色工具 ────────────────────────────
 
@@ -171,6 +174,18 @@ def do_disable():
     print(green("✅ 已取消开机自启"))
 
 
+def do_env_backup():
+    """给 .env 创建一个带时间戳的本地备份。"""
+    if not ENV_FILE.exists():
+        print(red(f"❌ 找不到 .env: {ENV_FILE}"))
+        return
+
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    backup_file = BASE_DIR / f".env.backup.{timestamp}"
+    shutil.copy2(ENV_FILE, backup_file)
+    print(green(f"✅ 已备份 .env -> {backup_file.name}"))
+
+
 # ──────────────────────────── 菜单 ────────────────────────────
 
 MENU_ITEMS = [
@@ -183,6 +198,7 @@ MENU_ITEMS = [
     ("最近 N 条日志",               do_log_recent),
     ("应用日志 (纯文本文件)",       do_log_app),
     ("实时日志 (systemd 原始)",     do_log_realtime),
+    ("备份 .env 配置",              do_env_backup),
     ("设置开机自启",                do_enable),
     ("取消开机自启",                do_disable),
 ]
@@ -195,6 +211,8 @@ CLI_SHORTCUTS = {
     "status":  do_status,
     "log":     do_log_realtime,
     "logs":    do_log_realtime,
+    "env-backup": do_env_backup,
+    "backup-env": do_env_backup,
 }
 
 

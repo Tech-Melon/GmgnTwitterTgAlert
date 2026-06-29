@@ -14,7 +14,7 @@ SUMMARY_SYSTEM_PROMPT = (
     "用户会提供某个频道在一个时间窗口内收到的推文列表，"
     "其中 reference 表示被回复、被引用、被转推或被删除的关联原文。"
     "请只基于输入内容总结，不要编造未出现的信息。"
-    "输出简体中文，结构清晰，适合直接推送到 Telegram 和飞书。"
+    "输出简体中文，结构清晰，适合直接推送到 Telegram。"
 )
 
 
@@ -45,13 +45,17 @@ async def summarize_channel_tweets(
         payload_text = payload_text[:18000] + "\n[输入过长，后续推文已截断]"
 
     prompt = (
-        "请生成频道定时摘要，格式如下：\n"
-        "1. 标题：包含频道名、时间窗口、推文数量。\n"
-        "2. 核心要点：3-6条，按重要性排序。\n"
-        "3. 重点事件/公告：列出具体事件、涉及账号和影响。\n"
-        "4. 市场含义：用谨慎语气总结可能影响，不做投资建议。\n"
-        "5. 值得回看：挑选最多5条推文，附作者和链接。\n\n"
-        "如果 truncated=true，请在摘要开头明确说明本次只覆盖部分推文样本。\n\n"
+        "请生成一条适合 Telegram 频道推送的 HTML 摘要，要求：\n"
+        "1. 必须只输出 Telegram Bot API 支持的 HTML，不要输出 Markdown、代码块或解释。\n"
+        "2. 总长度尽量控制在 1200 字以内，重点明确、不要嘈杂。\n"
+        "3. 标题格式：<b>🧾 {频道名} 频道摘要</b>，下一行用 <i>时间窗口 · 共N条推文</i>。\n"
+        "4. 用 3 条以内核心要点，每条以 emoji 开头，关键词用 <b>重点</b>。\n"
+        "5. 用一个 <blockquote expandable> 折叠块承载细节，块内最多写 3 个小标题："
+        "🔎 事件、📊 市场含义、🔗 回看。\n"
+        "6. 链接使用 <a href=\"URL\">查看原文</a>，最多保留 3 个链接。\n"
+        "7. 支持的标签仅可使用 <b>、<i>、<a>、<blockquote expandable>，"
+        "所有 &、<、> 等非标签字符必须正确转义。\n"
+        "8. 如果 truncated=true，请在标题后追加一行 <b>⚠️ 本次只覆盖部分推文样本</b>。\n\n"
         f"输入数据：\n{payload_text}"
     )
 
@@ -67,7 +71,7 @@ async def summarize_channel_tweets(
         ],
         "stream": False,
         "temperature": 0.2,
-        "max_tokens": 3000,
+        "max_tokens": 1500,
     }
 
     max_retries = 2

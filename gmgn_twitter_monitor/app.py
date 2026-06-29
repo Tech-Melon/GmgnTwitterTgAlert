@@ -211,14 +211,7 @@ def _build_distributor_hub(storage: SQLiteStorage | None = None) -> DistributorH
     distributors = [
         # 1. 日志分发器（始终启用）
         LoggingDistributor(),
-        # 2. WebSocket 实时广播
-        WebSocketDistributor(
-            host=config.WS_HOST,
-            port=config.WS_PORT,
-            token=config.WS_TOKEN,
-            heartbeat_interval=config.WS_HEARTBEAT_INTERVAL,
-        ),
-        # 3. Telegram 频道推送
+        # 2. Telegram 频道推送
         TelegramDistributor(
             bot_token=config.TG_BOT_TOKEN,
             default_channel_id=config.TG_CHANNEL_ID,
@@ -227,7 +220,7 @@ def _build_distributor_hub(storage: SQLiteStorage | None = None) -> DistributorH
             filter_handles=config.TG_FILTER_HANDLES,
             storage=storage,
         ),
-        # 4. 飞书分组推送 (与 TG 分组同源并发)
+        # 3. 飞书分组推送 (与 TG 分组同源并发)
         FeishuDistributor(
             app_id=config.FEISHU_APP_ID,
             app_secret=config.FEISHU_APP_SECRET,
@@ -238,12 +231,22 @@ def _build_distributor_hub(storage: SQLiteStorage | None = None) -> DistributorH
             filter_handles=config.TG_FILTER_HANDLES,
             storage=storage,
         ),
-        # 5. Webhook HTTP POST
+        # 4. Webhook HTTP POST
         WebhookDistributor(
             url=config.WEBHOOK_URL,
             secret=config.WEBHOOK_SECRET,
         ),
     ]
+    if config.WS_ENABLE:
+        distributors.insert(
+            1,
+            WebSocketDistributor(
+                host=config.WS_HOST,
+                port=config.WS_PORT,
+                token=config.WS_TOKEN,
+                heartbeat_interval=config.WS_HEARTBEAT_INTERVAL,
+            ),
+        )
     return DistributorHub(distributors, storage=storage)
 
 

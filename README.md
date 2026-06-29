@@ -4,7 +4,7 @@
 
 ### ✨ 核心特性
 
-- **全动作捕获**：覆盖发推、转推、回复、引用、关注/取关、删帖、换头像、改昵称、改简介、置顶/取消置顶共 12 种推特行为
+- **全动作捕获**：覆盖发推、转推、回复、引用、关注/取关、删帖、换头像、换横幅、改昵称、改简介、置顶/取消置顶共 13 种推特行为
 - **智能图文预览**：纯图推文优先使用原图直链确保 100% 准确预览，含视频推文通过 FxTwitter 实现内嵌播放，关注/取关等主页类动作通过 vxTwitter 渲染为用户名片
 - **DeepSeek 实时翻译与 AI 分析**：非阻塞异步翻译，推送完成后自动追加中文译文。支持对指定博主进行投资赛道分析（如 A 股股票名称代码提取）与智能摘要
 - **多频道智能路由**：按推特 Handle 分组路由到不同 Telegram 频道，同一博主可同时推送至多个频道
@@ -124,11 +124,25 @@ cp .env.example .env
 nano .env
 ```
 
+后续每次修改 `.env` 前，先创建本地备份：
+
+```bash
+python3 ctl.py env-backup
+nano .env
+python3 ctl.py restart
+```
+
+备份文件会保存为 `.env.backup.YYYYMMDD-HHMMSS`，并已被 `.gitignore` 忽略。
+
 完整的环境变量说明：
 
 | 变量名 | 必填 | 说明 |
 |--------|:----:|------|
-| `WS_TOKEN` | ✅ | WebSocket 鉴权 Token，建议用 `python3 -c "import secrets; print(secrets.token_urlsafe(32))"` 生成 |
+| `WS_ENABLE` | ❌ | WebSocket/WSS 客户端推送开关（`True`/`False`），默认 `False` |
+| `WS_TOKEN` | ❌ | WebSocket 鉴权 Token；仅 `WS_ENABLE=True` 时需要，建议用 `python3 -c "import secrets; print(secrets.token_urlsafe(32))"` 生成 |
+| `WS_HOST` | ❌ | WebSocket 监听地址，默认 `0.0.0.0` |
+| `WS_PORT` | ❌ | WebSocket 监听端口，默认 `8765` |
+| `WS_HEARTBEAT_INTERVAL` | ❌ | WebSocket 心跳间隔秒数，默认 `30` |
 | `TG_BOT_TOKEN` | ✅ | Telegram Bot API Token |
 | `FEISHU_APP_ID` | ❌ | 飞书企业自建应用 App ID (用于卡片原图提取与上传) |
 | `FEISHU_APP_SECRET` | ❌ | 飞书企业自建应用 App Secret |
@@ -299,7 +313,7 @@ sudo nginx -t && sudo systemctl reload nginx
               │
               ▼
    ┌─────────────────────┐
-   │  Parser 标准化 JSON   │ ← 12 种 Twitter 动作全解析
+   │  Parser 标准化 JSON   │ ← 13 种 Twitter 动作全解析
    └──────────┬──────────┘
               │
     MessageDeduplicator      ← 500ms 窗口智能去重
@@ -369,7 +383,7 @@ sudo nginx -t && sudo systemctl reload nginx
 }
 ```
 
-### `action` 字段枚举（共 12 种）
+### `action` 字段枚举（共 13 种）
 
 | 值 | 含义 | 说明 |
 |----|------|------|
@@ -381,6 +395,7 @@ sudo nginx -t && sudo systemctl reload nginx
 | `unfollow` | 取消关注 | `unfollow_target` 包含被取关者信息 |
 | `delete_post` | 删除推文 | `original_action` 记录被删推文的原始类型 |
 | `photo` | 更换头像 | `avatar_change` 包含 `before`/`after` 头像 URL |
+| `banner` | 更换横幅 | `banner_change` 包含 `before`/`after` 横幅 URL；GMGN 上游 `tw=other` 且包含横幅字段时会归一为该动作 |
 | `description` | 简介更新 | `bio_change` 包含 `before`/`after` 简介文本 |
 | `name` | 更改昵称 | 作者信息中包含新昵称 |
 | `pin` | 置顶推文 | `tweet_id` 包含被置顶的推文 ID |
@@ -393,6 +408,7 @@ sudo nginx -t && sudo systemctl reload nginx
 | `reference` | `repost` / `reply` / `quote` / `delete_post` |
 | `unfollow_target` | `follow` / `unfollow` |
 | `avatar_change` | `photo` |
+| `banner_change` | `banner` |
 | `bio_change` | `description` |
 | `original_action` | `delete_post` |
 

@@ -7,7 +7,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
 
 FIRST_RUN_LOGIN = False
-AUTH_URL = "https://gmgn.ai/tglogin?user_id=53b06598-3e2b-4d2f-aec6-f2e5881def90&code=2de464bb-1737-4c9f-823d-b7544dadc92e&id=0eae54fb142533ac"
+AUTH_URL = "https://gmgn.ai/tglogin?user_id=53b06598-3e2b-4d2f-aec6-f2e5881def90&code=41585435-24af-4131-b275-0aab311da4a3&id=0eae54fb142533ac"
 
 LOG_FILE = str(BASE_DIR / "twitter_monitor.log")
 USER_DATA_DIR = str(BASE_DIR / "browser_data")
@@ -21,10 +21,11 @@ XVFB_WIDTH = 1920
 XVFB_HEIGHT = 1080
 
 # ---------- WebSocket 分发配置 ----------
-WS_HOST = "0.0.0.0"
-WS_PORT = 8765
+WS_ENABLE = os.getenv("WS_ENABLE", "False").lower() in ("true", "1", "yes")
+WS_HOST = os.getenv("WS_HOST", "0.0.0.0")
+WS_PORT = int(os.getenv("WS_PORT", "8765"))
 WS_TOKEN = os.getenv("WS_TOKEN", "change-me-to-a-strong-token")
-WS_HEARTBEAT_INTERVAL = 30
+WS_HEARTBEAT_INTERVAL = int(os.getenv("WS_HEARTBEAT_INTERVAL", "30"))
 
 # ---------- Telegram 推送配置 ----------
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN", "")

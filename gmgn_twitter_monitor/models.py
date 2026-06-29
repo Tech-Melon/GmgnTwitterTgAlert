@@ -41,6 +41,7 @@ class UnfollowTarget:
     name: Optional[str]
     bio: Optional[str]
     avatar: Optional[str]
+    banner: Optional[str]
     followers: Optional[int]
 
 
@@ -52,6 +53,12 @@ class AvatarChange:
 
 @dataclass
 class BioChange:
+    before: Optional[str]
+    after: Optional[str]
+
+
+@dataclass
+class BannerChange:
     before: Optional[str]
     after: Optional[str]
 
@@ -69,6 +76,7 @@ class StandardizedMessage:
     unfollow_target: Optional[UnfollowTarget]
     avatar_change: Optional[AvatarChange]
     bio_change: Optional['BioChange']
+    banner_change: Optional['BannerChange']
 
     def to_dict(self) -> dict:
         return asdict(self)
